@@ -1,6 +1,7 @@
 
 #include "common.h"
 #include "utils.h"
+#include "console.h"
 
 struct _gopt gopt;
 
@@ -112,20 +113,30 @@ cb_sigterm(int sig)
 	exit(255);	// will call cb_atexit()
 }
 
-static void
-cb_atexit(void)
+void
+get_winsize(void)
 {
-	stty_reset();
+	int ret;
+
+	memcpy(&gopt.winsize_prev, &gopt.winsize, sizeof gopt.winsize_prev);
+	
+	ret = ioctl(STDOUT_FILENO, TIOCGWINSZ, &gopt.winsize);
+	if ((ret == 0) && (gopt.winsize.ws_col != 0))
+	{
+		/* SUCCESS */
+		DEBUGF_M("Columns: %d, Rows: %d\n", gopt.winsize.ws_col, gopt.winsize.ws_row);
+	} else {
+		gopt.winsize.ws_col = 80;
+		gopt.winsize.ws_row = 24;
+	}
 }
 
 void
 init_vars(void)
 {
-	int ret;
-
 	GS_library_init(gopt.err_fp, /* Debug Output */ gopt.err_fp);
-
-	ret = GS_CTX_init(&gopt.gs_ctx, &gopt.rfd, &gopt.wfd, &gopt.r, &gopt.w, &gopt.tv_now);
+	GS_LIST_init(&gopt.ids_peers, 0);
+	GS_CTX_init(&gopt.gs_ctx, &gopt.rfd, &gopt.wfd, &gopt.r, &gopt.w, &gopt.tv_now);
 
 	if (gopt.is_use_tor == 1)
 		GS_CTX_setsockopt(&gopt.gs_ctx, GS_OPT_USE_SOCKS, NULL, 0);
@@ -166,17 +177,6 @@ init_vars(void)
 	DEBUGF("PID = %d\n", getpid());
 
 	signal(SIGTERM, cb_sigterm);
-	atexit(cb_atexit);
-
-	ret = ioctl(STDOUT_FILENO, TIOCGWINSZ, &gopt.winsize);
-	if ((ret == 0) && (gopt.winsize.ws_col != 0))
-	{
-		/* SUCCESS */
-		DEBUGF_M("Columns: %d, Rows: %d\n", gopt.winsize.ws_col, gopt.winsize.ws_row);
-	} else {
-		gopt.winsize.ws_col = 80;
-		gopt.winsize.ws_row = 24;
-	}
 }
 
 void
@@ -307,9 +307,8 @@ do_getopt(int argc, char *argv[])
 	}
 }
 
-static int is_stty_set_raw;
-struct termios tios_saved;
-
+static struct termios tios_saved;
+static int is_stty_raw;
 /*
  * Client only: Save TTY state and set raw mode.
  */
@@ -317,7 +316,8 @@ void
 stty_set_raw(void)
 {
 	int ret;
-	if (is_stty_set_raw)
+
+	if (is_stty_raw != 0)
 		return;
 
 	if (!isatty(STDIN_FILENO))
@@ -354,8 +354,11 @@ stty_set_raw(void)
     tios.c_cc[VTIME] = 0;
     tcsetattr(STDIN_FILENO, TCSADRAIN, &tios);
     // tcsetattr(STDIN_FILENO, TCSAFLUSH, &tios);
+    
+    /* Set NON blocking */
+    // fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK | fcntl(STDIN_FILENO, F_GETFL, 0));
 
-	is_stty_set_raw = 1;
+    is_stty_raw = 1;
 }
 
 /*
@@ -364,25 +367,24 @@ stty_set_raw(void)
 void
 stty_reset(void)
 {
-	if (is_stty_set_raw == 0)
+	if (is_stty_raw == 0)
 		return;
 
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &tios_saved);
+	is_stty_raw = 0;
+	DEBUGF_G("resetting TTY\n");
+    tcsetattr(STDIN_FILENO, TCSADRAIN, &tios_saved);
 }
 
 static const char esc_seq[] = "\r~.\r";
 static int esc_pos;
 /*
- * Check if interactive mode/Client mode and user typed '\n~.\n' escape
+ * In nteractive mode/Client mode check if User typed '\n~.\n' escape
  * sequence.
  */
 void
 stty_check_esc(GS *gs, char c)
 {
-	if (is_stty_set_raw == 0)
-		return;
-
-	DEBUGF_R("chekcing %d on esc_pos %d == %d\n", c, esc_pos, esc_seq[esc_pos]);
+	// DEBUGF_R("checking %d on esc_pos %d == %d\n", c, esc_pos, esc_seq[esc_pos]);
 	if (c == esc_seq[esc_pos])
 	{
 		esc_pos++;
@@ -407,9 +409,14 @@ static const char *
 mk_shellname(char *shell_name, ssize_t len)
 {
 	const char *shell = getenv("SHELL");
-	if (shell == NULL)
-		shell = "/bin/sh";
-
+	if ((shell == NULL) || (strlen(shell) == 0))
+	{
+		shell = "/bin/sh";	// default
+		/* Try /bin/bash if available */
+		struct stat sb;
+		if (stat("/bin/bash", &sb) == 0)
+			shell = "/bin/bash";
+	}
 	char *ptr = strrchr(shell, '/');
 	if (ptr == NULL)
 	{
@@ -425,23 +432,32 @@ mk_shellname(char *shell_name, ssize_t len)
  * Create an envp list from existing env. This is a hack for cmd-execution.
  * 'blacklist' contains env-vars which should not be part of the new
  * envp for the shell (such as STY, a screen variable, which we must remove).
+ * 'addlist' contains env-vars that should be added _if_ they do not yet
+ * exist.
+ *
+ * If blacklist and addlist contain the same variable then that variable
+ * will be replaced with the one from addlist.
  */
 char **
-mk_env(char **blacklist)
+mk_env(char **blacklist, char **addlist)
 {
 	char **env;
 	int total = 0;
+	int add_total = 0;
 	int i;
 	char *end;
+	int n;
 
 	for (i = 0; environ[i] != NULL; i++)
-	{
 		total++;
-	}
+
+	for (i = 0; addlist[i] != NULL; i++)
+		add_total++;
+
 	// DEBUGF("Number of environment variables: %d (calloc(%d, %zu)\n", total, total + 1, sizeof *env);
+	env = calloc(total + add_total + 1, sizeof *env);
 
-	env = calloc(total + 1, sizeof *env);
-
+	/* Copy to env unless variable is in blacklist */
 	int ii = 0;
 	for (i = 0; i < total; i++)
 	{
@@ -451,6 +467,7 @@ mk_env(char **blacklist)
 		end = strchr(s, '=');
 		if (end == NULL)
 			continue;			// Illegal enviornment variable
+		/* Check if the env is in the BLACK list */
 		char **b = blacklist;
 		for (; *b != NULL; b++)
 		{
@@ -464,6 +481,39 @@ mk_env(char **blacklist)
 
 		env[ii] = strdup(s);
 		ii++;
+	}
+
+	/* Append to env unless variable is already in env */
+	int env_len = ii;
+	int should_add;
+	for (n = 0; addlist[n] != NULL; n++)
+	{
+		char *al_end = strchr(addlist[n], '=');
+		if (al_end == NULL)
+			continue;
+
+		should_add = 1;
+		for (i = 0; i < env_len; i++)
+		{
+			char *s = env[i];
+			end = strchr(s, '=');
+			if (end == NULL)
+				continue;
+			if (al_end - addlist[n] != end - s)
+				continue;
+			if (memcmp(s, addlist[n], end - s) == 0)
+			{
+				should_add = 0;
+				break;	// Already in this list
+			}
+		}
+		if (should_add != 0)
+		{
+			// DEBUGF_C("Adding %s\n", addlist[n]);
+			env[ii] = strdup(addlist[n]);
+			ii++;
+		}
+
 	}
 
 	return env;
@@ -481,6 +531,8 @@ setup_cmd_child(void)
 	signal(SIGPIPE, SIG_DFL);
 }
 
+#if 0
+/* 'resize' as per xterm() and using ANSI codes */
 #define ESCAPE(string) "\033" string
 #define PTY_RESIZE_STR	ESCAPE("7") ESCAPE("[r") ESCAPE("[9999;9999H") ESCAPE("[6n")
 #define PTY_RESTORE		ESCAPE("8")
@@ -610,6 +662,8 @@ err:
 	onintr(0);
 }
 
+#endif
+
 #ifndef HAVE_OPENPTY
 static int
 openpty(int *amaster, int *aslave, void *a, void *b, void *c)
@@ -710,30 +764,49 @@ pty_cmd(const char *cmd)
 		#endif
 		if (fd >= 0)
 		{
-			pty_resize(fd);
+			//pty_resize(fd);
 			close(fd);
 		}
 
 		/* HERE: Child */
 		setup_cmd_child();
-		/* Remove some environment variables:
-		 * STY = screen specific.
-		 * GSOCKET_ARGS = Otherwise any further gs-netcat command would use
-		 *    execute with same (hidden) commands as the current shell.
+
+		/* Find out default ENV (just in case they do not exist in current
+		 * env-variable such as when started during bootup
 		 */
-		char *env_blacklist[] = {"STY", "GSOCKET_ARGS", NULL}; // Remove 'screen' tty
-		char **envp = mk_env(env_blacklist);
+		const char *shell;		// e.g. /bin/bash
+		char shell_name[64];	// e.g. -bash
+		if (cmd != NULL)
+		{
+			shell = "/bin/sh";
+		} else {
+			shell = mk_shellname(shell_name, sizeof shell_name);
+		}
+		char shell_env[64];		// e.g. SHELL=/bin/bash
+		snprintf(shell_env, sizeof shell_env, "SHELL=%s", shell);
+
+		char home_env[128];
+		snprintf(home_env, sizeof home_env, "HOME=/root");	// default
+		struct passwd *pwd;
+		pwd = getpwuid(getuid());
+		if (pwd != NULL)
+			snprintf(home_env, sizeof home_env, "HOME=%s", pwd->pw_dir);
+
+		/* Remove some environment variables:
+		 * STY = Confuses screen if gs-netcat is started from within screen (OSX)
+		 * GSOCKET_ARGS = Otherwise any further gs-netcat command would
+		 *    execute with same (hidden) commands as the current shell.
+		 * HISTFILE= does not work on oh-my-zsh (it sets it again)
+		 */
+		char *env_blacklist[] = {"STY", "GSOCKET_ARGS", "HISTFILE", NULL};
+		char *env_addlist[] = {shell_env, "TERM=xterm-256color", "HISTFILE=\"\"", home_env, NULL};
+		char **envp = mk_env(env_blacklist, env_addlist);
 
 		if (cmd != NULL)
 		{
 			execle("/bin/sh", cmd, "-c", cmd, NULL, envp);
 			ERREXIT("exec(%s) failed: %s\n", cmd, strerror(errno));
 		} 
-
-		char shell_name[64];
-
-		const char *shell;
-		shell = mk_shellname(shell_name, sizeof shell_name);
 
 		const char *args = "-il";	// bash, fish, zsh
 		if (strcmp(shell_name, "-sh") == 0)
@@ -895,5 +968,84 @@ fd_new_socket(void)
 
 	return fd;
 }
+
+void
+cmd_ping(struct _peer *p)
+{
+	if (gopt.is_want_ping != 0)
+		return;
+
+	gopt.is_want_ping = 1;
+	GS_SELECT_FD_SET_W(p->gs);
+}
+
+
+const char fname_valid_char[] = ""
+"................"
+"................"
+" !.#$%&.()*+,-.."	/* Dont allow " or / or ' */
+"0123456789:;.=.."	/* Dont allow < or > or ? */
+"@ABCDEFGHIJKLMNO"
+"PQRSTUVWXYZ[.]^_"	/* Dont allow \ */
+".abcdefghijklmno"	/* Dont allow ` */
+"pqrstuvwxyz{.}.." 	/* Dont allow | or ~ */
+"";
+
+void
+sanitize_fname_to_str(uint8_t *str, size_t len)
+{
+	int i;
+	uint8_t c;
+
+	for (i = 0; i + 1 < len; i++)
+	{
+		c = str[i];
+		if (c < sizeof fname_valid_char)
+		{
+			if (c == fname_valid_char[c])
+				continue;
+		}
+		if (c == 0)
+			break;
+		DEBUGF("san 0x%02x\n", c);
+		str[i] = '#'; // Change to # if invalid character
+	}
+
+	str[i] = 0x00; // always 0 terminate
+}
+
+
+static const char unit[] = "BKMGT";
+void
+format_bps(char *buf, size_t size, int64_t bytes)
+{
+	int i;
+
+	if (bytes < 1000)
+	{
+		snprintf(buf, size, "%3d.0 B", (int)bytes);
+		return;
+	}
+	bytes *= 100;
+
+	for (i = 0; bytes >= 100*1000 && unit[i] != 'T'; i++)
+		bytes = (bytes + 512) / 1024;
+	snprintf(buf, size, "%3lld.%1lld%c%s",
+            (long long) (bytes + 5) / 100,
+            (long long) (bytes + 5) / 10 % 10,
+            unit[i],
+            i ? "B" : " ");
+}
+
+
+
+
+
+
+
+
+
+
+
 
 
