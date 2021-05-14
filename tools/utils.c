@@ -1,11 +1,12 @@
 
+// #define DEBUG_CTX_DECLARED (1)  // All others define this as extern
+
 #include "common.h"
 #include "utils.h"
 #include "console.h"
 
-struct _gopt gopt;
-
 extern char **environ;
+
 
 /*
  * Add list of argv's from GSOCKET_ARGS to argv[]
@@ -46,7 +47,7 @@ add_env_argv(int *argcptr, char **argvptr[])
 		{
 			/* *next == '\0'; str points to argument (0-terminated) */
 			newargc++;
-			DEBUGF("%d. arg = '%s'\n", newargc, str);
+			// DEBUGF("%d. arg = '%s'\n", newargc, str);
 			newargv = realloc(newargv, newargc * sizeof newargv);
 			newargv[newargc - 1] = str;
 		}
@@ -65,10 +66,10 @@ add_env_argv(int *argcptr, char **argvptr[])
 
 	*argcptr = newargc;
 	*argvptr = newargv;
-	DEBUGF("Total argv[] == %d\n", newargc);
-	int i;
-	for (i = 0; i < newargc + 1; i++)
-		DEBUGF("argv[%d] = %s\n", i, newargv[i]);
+	// DEBUGF("Total argv[] == %d\n", newargc);
+	// int i;
+	// for (i = 0; i < newargc; i++)
+	// 	DEBUGF("argv[%d] = %s\n", i, newargv[i]);
 }
 
 void
@@ -159,22 +160,25 @@ init_vars(void)
 	if (gopt.is_multi_peer == 0)
 		GS_CTX_setsockopt(&gopt.gs_ctx, GS_OPT_SINGLESHOT, NULL, 0);
 
+	// Prevent startup messages if gs-netcat is started as sub-system from
+	// gs-sftp or gs-mount
+	int is_greetings = 1;
+	if (getenv("GSOCKET_NO_GREETINGS") != NULL)
+		is_greetings = 0;
+
 	char *str = getenv("GSOCKET_ARGS");
-	if ((str != NULL) && (strlen(str) > 0))
+	if ((str != NULL) && (strlen(str) > 0) && (is_greetings))
 		VLOG("=Extra arguments: '%s'\n", str);
 
-	DEBUGF("sec_str %s\n", gopt.sec_str);
 	gopt.sec_str = GS_user_secret(&gopt.gs_ctx, gopt.sec_file, gopt.sec_str);
 	if (gopt.sec_str == NULL)
 		ERREXIT("%s\n", GS_CTX_strerror(&gopt.gs_ctx));
 
-	VLOG("=Secret         : \"%s\"\n", gopt.sec_str);
+	if (is_greetings)
+		VLOG("=Secret         : \"%s\"\n", gopt.sec_str);
 
 	/* Convert a secret string to an address */
 	GS_ADDR_str2addr(&gopt.gs_addr, gopt.sec_str);
-	gopt.gsocket = gs_create();
-
-	DEBUGF("PID = %d\n", getpid());
 
 	signal(SIGTERM, cb_sigterm);
 }
@@ -192,7 +196,7 @@ usage(const char *params)
 				fprintf(stderr, "  -L <file>    Logfile\n");
 				break;
 			case 'q':
-				fprintf(stderr, "  -q           Quite. No log output\n");
+				fprintf(stderr, "  -q           Quiet. No log output\n");
 				break;
 			case 'r':
 				fprintf(stderr, "  -r           Receive-only. Terminate when no more data.\n");
@@ -239,6 +243,17 @@ zap_arg(char *str)
 	memset(str, '*', len);
 }
 
+char *
+getcwdx(void)
+{
+#if defined(__sun) && defined(HAVE_OPEN64)
+	// This is solaris 10
+	return getcwd(NULL, PATH_MAX + 1); // solaris10 segfaults if size is 0...
+#else
+	return getcwd(NULL, 0);
+#endif
+}
+
 void
 do_getopt(int argc, char *argv[])
 {
@@ -260,7 +275,7 @@ do_getopt(int argc, char *argv[])
 				gopt.is_use_tor = 1;
 				break;
 			case 'q':
-				gopt.is_quite = 1;
+				gopt.is_quiet = 1;
 				break;
 			case 'r':
 				gopt.is_receive_only = 1;
@@ -520,149 +535,20 @@ mk_env(char **blacklist, char **addlist)
 }
 
 static void
-setup_cmd_child(void)
+setup_cmd_child(int except_fd)
 {
 	/* Close all (but 1 end of socketpair) fd's */
 	int i;
-	for (i = 3; i < FD_SETSIZE; i++)
+	for (i = 3; i < MIN(getdtablesize(), FD_SETSIZE); i++)
+	{
+		if (i == except_fd)
+			continue;
 		close(i);
+	}
 
 	signal(SIGCHLD, SIG_DFL);
 	signal(SIGPIPE, SIG_DFL);
 }
-
-#if 0
-/* 'resize' as per xterm() and using ANSI codes */
-#define ESCAPE(string) "\033" string
-#define PTY_RESIZE_STR	ESCAPE("7") ESCAPE("[r") ESCAPE("[9999;9999H") ESCAPE("[6n")
-#define PTY_RESTORE		ESCAPE("8")
-#define PTY_SIZE_STR	ESCAPE("[%d;%dR")
-#define UIntClr(dst,bits) dst = dst & (unsigned) ~(bits)
-static int tty;
-static struct termios tioorig;
-static int onintr_called;
-
-static void
-onintr(int sig)
-{
-	if (onintr_called)
-		return;
-
-	onintr_called = 1;
-    (void) tcsetattr(tty, TCSADRAIN, &tioorig);
-}
-
-static void
-resize_timeout(int sig)
-{
-	onintr(sig);
-}
-
-static int
-readstring(int fd, char *buf, size_t sz, const char *str)
-{
-    unsigned char last;
-    unsigned char c;
-    int n;
-    int rv = -1;
-    char *end = buf + sz;
-
-    signal(SIGALRM, resize_timeout);
-    alarm(10);
-    n = read(fd, &c, 1);
-    if (n <= 0)
-		goto err;
-
-    if (c == 0233)
-    {	/* meta-escape, CSI */
-		*buf++ = ESCAPE("")[0];
-		*buf++ = '[';
-    } else {
-		*buf++ = (char) c;
-    }
-    if (c != *str)
-		goto err;
-
-    last = str[strlen(str) - 1];	// R
-    while (1)
-    {
-		n = read(fd, &c, 1);
-		if (n <= 0)
-			goto err;
-		*buf++ = c;
-		if (c == last)
-			break;
-		if (buf >= end)
-			goto err;
-    }
-
-    alarm(0);
-    *buf = 0;
-    rv = 0;
-err:
-	if (rv != 0)
-	{
-		signal(SIGALRM, SIG_DFL);
-		alarm(0);	// CANCEL alarm
-	}
-    return rv;
-}
-
-
-static void
-pty_resize(int fd)
-{
-	int rv = -1;
-    struct termios tio;
-    int rows;
-    int cols;
-    char buf[64];
-    struct winsize ws;
-
-
-    tty = fd;
-	rv = tcgetattr(tty, &tioorig);
-    if (rv != 0)
-		return;
-    tio = tioorig;
-
-	/* FIXME: set signal here */
-
-    UIntClr(tio.c_iflag, ICRNL);
-    UIntClr(tio.c_lflag, (ICANON | ECHO));
-    tio.c_cflag |= CS8;
-    tio.c_cc[VMIN] = 6;
-    tio.c_cc[VTIME] = 1;
-	rv = tcsetattr(tty, TCSADRAIN, &tio);
-    if (rv != 0)
-    {
-    	goto err;
-    }
-
-    rv = write(fd, PTY_RESIZE_STR PTY_RESTORE, strlen(PTY_RESIZE_STR) + strlen(PTY_RESTORE));
-    rv = readstring(tty, buf, sizeof buf, PTY_SIZE_STR);
-    if (rv != 0)
-		goto err;
-    if (sscanf(buf, PTY_SIZE_STR, &rows, &cols) != 2)
-		goto err;
-
-    memset(&ws, 0, sizeof ws);
-    ws.ws_col = cols;
-    ws.ws_row = rows;
-
-    ioctl(fd, TIOCSWINSZ, &ws);
-    onintr(0);
-	// fprintf(stderr, "rows %d, cols %d\n", rows, cols);
-    rv = 0;
-err:
-	if (rv != 0)
-	{
-	}
-	/* reset terminal values. cleanup */
-	onintr(0);
-}
-
-#endif
 
 #ifndef HAVE_OPENPTY
 static int
@@ -744,7 +630,7 @@ forkpty(int *fd, void *a, void *b, void *c)
 #endif /* HAVE_FORKPTY */
 
 int
-pty_cmd(const char *cmd)
+pty_cmd(const char *cmd, pid_t *pidptr)
 {
 	pid_t pid;
 	int fd;
@@ -762,14 +648,13 @@ pty_cmd(const char *cmd)
 		#ifdef HAVE_FORKPTY
 		fd = open("/dev/tty", O_NOCTTY | O_RDWR);
 		#endif
-		if (fd >= 0)
-		{
-			//pty_resize(fd);
-			close(fd);
-		}
+		// if (fd >= 0)
+		// {
+		// 	close(fd);
+		// }
 
 		/* HERE: Child */
-		setup_cmd_child();
+		setup_cmd_child(fd);
 
 		/* Find out default ENV (just in case they do not exist in current
 		 * env-variable such as when started during bootup
@@ -799,7 +684,7 @@ pty_cmd(const char *cmd)
 		 * HISTFILE= does not work on oh-my-zsh (it sets it again)
 		 */
 		char *env_blacklist[] = {"STY", "GSOCKET_ARGS", "HISTFILE", NULL};
-		char *env_addlist[] = {shell_env, "TERM=xterm-256color", "HISTFILE=\"\"", home_env, NULL};
+		char *env_addlist[] = {shell_env, "TERM=xterm-256color", "HISTFILE=/dev/null", home_env, NULL};
 		char **envp = mk_env(env_blacklist, env_addlist);
 
 		if (cmd != NULL)
@@ -819,6 +704,9 @@ pty_cmd(const char *cmd)
 	}
 	/* HERE: Parent */
 
+	if (pidptr)
+		*pidptr = pid;
+
 	return fd;
 }
 
@@ -826,17 +714,15 @@ pty_cmd(const char *cmd)
  * Spawn a cmd and return fd.
  */
 int
-fd_cmd(const char *cmd)
+fd_cmd(const char *cmd, pid_t *pidptr)
 {
 	pid_t pid;
 	int fds[2];
 	int ret;
 
-	DEBUGF("cmd == %s\n", cmd);
-
 	if (gopt.is_interactive)
 	{
-		return pty_cmd(cmd);
+		return pty_cmd(cmd, pidptr);
 	}
 
 	ret = socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
@@ -850,16 +736,30 @@ fd_cmd(const char *cmd)
 	if (pid == 0)
 	{
 		/* HERE: Child process */
+		setup_cmd_child(fds[0]);
 		dup2(fds[0], STDOUT_FILENO);
 		dup2(fds[0], STDERR_FILENO);
 		dup2(fds[0], STDIN_FILENO);
-		setup_cmd_child();
+#ifdef __CYGWIN__
+		// Cygwin throws "Connection reset by peer" on socketpair when system
+		// is under heavy load if we execl() immediately.
+		// It appears that perhaps the child executes to quickly. Any pending data
+		// on stdout is then lost and the parent gets a read-error on the
+		// socketpair-fd (Connection reset by peer). The only work around
+		// is to add a 'sleep 0.2' to any executed command. Happens very
+		// rarely. It can easily be reproduced by running test 7.1 with these
+		// two lines:
+		// write(fds[0], "Hello World\n", 12);
+		// exit(0);
+#endif
 
 		execl("/bin/sh", cmd, "-c", cmd, NULL);
 		ERREXIT("exec(%s) failed: %s\n", cmd, strerror(errno));
 	}
 
 	/* HERE: Parent process */
+	if (pidptr)
+		*pidptr = pid;
 	close(fds[0]);
 
 	return fds[1];
@@ -881,7 +781,7 @@ fd_net_connect(GS_SELECT_CTX *ctx, int fd, uint32_t ip, uint16_t port)
 	addr.sin_addr.s_addr = ip;
 	addr.sin_port = port;
 	ret = connect(fd, (struct sockaddr *)&addr, sizeof addr);
-	DEBUGF("connect(%s:%d, fd = %d): %d (errno = %d)\n", int_ntoa(ip), ntohs(port), fd, ret, errno);
+	DEBUGF("connect(%s:%d, fd = %d): %d (errno = %d, %s)\n", int_ntoa(ip), ntohs(port), fd, ret, errno, strerror(errno));
 	if (ret != 0)
 	{
 		if ((errno == EINPROGRESS) || (errno == EAGAIN) || (errno == EINTR))
@@ -924,25 +824,46 @@ fd_net_accept(int listen_fd)
  * Create a listening fd on port.
  */
 int
-fd_net_listen(int fd, uint16_t port)
+fd_net_listen(int fd, uint16_t *port, int type)
 {
 	struct sockaddr_in addr;
 	int ret;
+	int is_random_port = 0;
+
+	if ((port == NULL) || (*port == 0))
+		is_random_port = 1;
 
 	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof (int));
 
 	memset(&addr, 0, sizeof addr);
 	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	addr.sin_port = port;
+	if (is_random_port == 0)
+	{
+		addr.sin_port = *port;
+		addr.sin_addr.s_addr = htonl(INADDR_ANY);
+	} else {
+		addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+	}
 
 	ret = bind(fd, (struct sockaddr *)&addr, sizeof addr);
 	if (ret < 0)
 		return ret;
 
-	ret = listen(fd, 1);
-	if (ret != 0)
-		return -1;
+	if (is_random_port)
+	{
+		struct sockaddr_in paddr;
+		socklen_t plen = sizeof addr;
+		ret = getsockname(fd, (struct sockaddr *)&paddr, &plen);
+		*port = paddr.sin_port;
+	}
+
+	if (type == SOCK_STREAM)
+	{
+		// HERE: TCP socket (needs listen()
+		ret = listen(fd, 1);
+		if (ret != 0)
+			return -1;
+	}
 
 	return 0;
 }
@@ -952,12 +873,12 @@ fd_net_listen(int fd, uint16_t port)
  * Return < 0 on fata error.
  */
 int
-fd_new_socket(void)
+fd_new_socket(int type)
 {
 	int fd;
 	int ret;
 
-	fd = socket(PF_INET, SOCK_STREAM, 0);
+	fd = socket(PF_INET, type, 0);
 	if (fd < 0)
 		return -2;
 	DEBUGF_W("socket() == %d\n", fd);
@@ -979,6 +900,15 @@ cmd_ping(struct _peer *p)
 	GS_SELECT_FD_SET_W(p->gs);
 }
 
+void
+cmd_pwd(struct _peer *p)
+{
+	if (gopt.is_want_pwd != 0)
+		return;
+
+	gopt.is_want_pwd = 1;
+	GS_SELECT_FD_SET_W(p->gs);
+}
 
 const char fname_valid_char[] = ""
 "................"
@@ -1014,38 +944,82 @@ sanitize_fname_to_str(uint8_t *str, size_t len)
 	str[i] = 0x00; // always 0 terminate
 }
 
-
-static const char unit[] = "BKMGT";
+/*
+ * Duplicate the process. Parent to check if child dies by monitoring stdin
+ * socketpair to child and parent also monitors its own stdin to
+ * check if calling process has died.
+ *
+ * If child dies then fork again.
+ * This function is different to GS_daemonize
+ * -> ppid is not 1 (not becoming a daemon).
+ * -> not using wait() to check for child's death
+ * -> This parent does not become a new session leader (no setsid()).
+ *
+ * This function is used when gsocket hijacks a process and needs to spawn
+ * a gs-netcat process. The gs-netcat process needs to monitor when the calling
+ * app exits (and this can only be done by monitoring when its own stdin becomes
+ * unavailable).
+ *
+ * This funciton loops forever and never returns.
+ */
 void
-format_bps(char *buf, size_t size, int64_t bytes)
+gs_watchdog(void)
 {
-	int i;
+	pid_t pid;
 
-	if (bytes < 1000)
+	while (1) // LOOP FOREVER
 	{
-		snprintf(buf, size, "%3d.0 B", (int)bytes);
-		return;
+
+		int fds[2];
+		socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+		pid = fork();
+		XASSERT(pid >= 0, "fork(): %s\n", strerror(errno));
+
+		if (pid == 0)
+		{
+			// CHILD
+			close(fds[1]);
+			dup2(fds[0], STDIN_FILENO);
+			return; // CHILD continues to execute
+		}
+
+		// PARENT:
+		close(fds[0]);
+		// fdsp[1] is a socket to the child. We can detect when it dies....
+		fd_set rfds;
+		FD_ZERO(&rfds);
+
+		int n;
+		while (1)
+		{
+			FD_SET(STDIN_FILENO, &rfds);
+			FD_SET(fds[1], &rfds);
+			n = select(fds[1] + 1, &rfds, NULL, NULL, NULL);
+			if (n < 0)
+			{
+				if (errno == EINTR)
+					continue;
+				exit(255); // FATAL
+			}
+
+			// If parent dies then die immediately (this closes fds[0] and all child will die)
+			if (FD_ISSET(STDIN_FILENO, &rfds))
+			{
+				// DEBUGF_Y("watchdog STDIN is set. EOF (parent died)?\n");
+				exit(0);
+			}
+			if (FD_ISSET(fds[1], &rfds))
+			{
+				// Oops. Child died. Restart.
+				close(fds[1]);
+				sleep(5); // Grace period to prevent exessive restarts...
+				break;
+			}
+			sleep(1); // Grace period (not needed, unless select() goes haywire...)
+		}
 	}
-	bytes *= 100;
 
-	for (i = 0; bytes >= 100*1000 && unit[i] != 'T'; i++)
-		bytes = (bytes + 512) / 1024;
-	snprintf(buf, size, "%3lld.%1lld%c%s",
-            (long long) (bytes + 5) / 100,
-            (long long) (bytes + 5) / 10 % 10,
-            unit[i],
-            i ? "B" : " ");
+	// NOT REACHED
 }
-
-
-
-
-
-
-
-
-
-
-
 
 

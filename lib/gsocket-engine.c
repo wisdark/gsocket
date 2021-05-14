@@ -19,11 +19,12 @@
 #include "gs-externs.h"
 
 #ifdef DEBUG
-//# define DEBUG_SELECT	(1)
+// # define DEBUG_SELECT	(1)
 #endif
 
 #ifdef DEBUG
 FILE *gs_dout;		/* DEBUG OUTPUT */
+int gs_did;         // debug ID
 int gs_debug_level;
 fd_set *gs_debug_rfd;
 fd_set *gs_debug_wfd;
@@ -214,7 +215,7 @@ GS_CTX_init(GS_CTX *ctx, fd_set *rfd, fd_set *wfd, fd_set *r, fd_set *w, struct 
 	ctx->socks_port = htons(GS_SOCKS_DFL_PORT);
 	char *ptr;
 	ptr = getenv("GSOCKET_SOCKS_IP");
-	if (ptr != NULL)
+	if ((ptr != NULL) && (*ptr != '\0'))
 		ctx->socks_ip = inet_addr(ptr);
 
 	ptr = getenv("GSOCKET_SOCKS_PORT");
@@ -366,6 +367,11 @@ GS_new(GS_CTX *ctx, GS_ADDR *addr)
 	gsocket->net.fd_accepted = -1;
 
 	gsocket->net.n_sox = 1;
+	int i;
+	for (i = 0; i < gsocket->net.n_sox; i++)
+	{
+		gsocket->net.sox[i].fd = -1;
+	}
 	gsocket->flags = ctx->gs_flags;
 
 	memcpy(&gsocket->gs_addr, addr, sizeof gsocket->gs_addr);
@@ -405,8 +411,9 @@ gs_net_connect_by_sox(GS *gsocket, struct gs_sox *sox)
 	addr.sin_family = AF_INET;
 	addr.sin_addr.s_addr = gsocket->net.addr;
 	addr.sin_port = gsocket->net.port;
+	errno = 0;
 	ret = connect(sox->fd, (struct sockaddr *)&addr, sizeof addr);
-	DEBUGF("connect(%s:%d, fd = %d): %d (errno = %d)\n", int_ntoa(gsocket->net.addr), ntohs(addr.sin_port), sox->fd, ret, errno);
+	DEBUGF("connect(%s:%d, fd = %d): %d (errno = %d, %s)\n", int_ntoa(gsocket->net.addr), ntohs(addr.sin_port), sox->fd, ret, errno, strerror(errno));
 	gsocket->net.tv_connect = GS_TV_TO_USEC(gsocket->ctx->tv_now);
 	if (ret != 0)
 	{
@@ -513,6 +520,9 @@ gs_pkt_ping_write(GS *gsocket, struct gs_sox *sox)
 	int ret;
 
 	DEBUGF("### PKT PING write(fd = %d)\n", sox->fd);
+	// Might be 0 if SSL has not completed yet
+	if (sox->fd < 0)
+		return 0;
 
 	/* Do not send PING if there is already data in output queue */
 	if (FD_ISSET(sox->fd, gsocket->ctx->wfd))
@@ -654,7 +664,11 @@ gs_pkt_dispatch(GS *gsocket, struct gs_sox *sox)
 				case GS_STATUS_CODE_IDLE_TIMEOUT:
 					err_str = "Idle-Timeout. Server did not receive any data";
 					break;
+				default:
+					err_str = "Unknown";
+					break;
 			}
+			gsocket->status_code = status->code;
 			gs_set_errorf(gsocket, "%s (%u)", err_str, status->code);
 			return GS_ERR_FATAL;
 		}
@@ -1211,8 +1225,8 @@ gs_net_connect(GS *gsocket)
 static void
 gs_net_init_by_sox(GS_CTX *ctx, struct gs_sox *sox)
 {
-	FD_CLR(sox->fd, ctx->wfd);
-	FD_CLR(sox->fd, ctx->rfd);
+	XFD_CLR(sox->fd, ctx->wfd);
+	XFD_CLR(sox->fd, ctx->rfd);
 	// FD_CLR(sox->fd, ctx->w);
 	// FD_CLR(sox->fd, ctx->r);
 	memset(sox, 0, sizeof *sox);
@@ -1380,6 +1394,8 @@ GS_connect(GS *gsocket)
 {
 	int ret;
 
+	DEBUG_SETID(gsocket);
+
 	if (gsocket->net.fd_accepted >= 0)
 	{
 		/* This GS-socket is already connected.... */
@@ -1421,6 +1437,8 @@ GS_connect(GS *gsocket)
 int
 GS_listen(GS *gsocket, int backlog)
 {
+	DEBUG_SETID(gsocket);
+
 	gsocket->flags |= GS_FL_AUTO_RECONNECT;
 	gs_net_init(gsocket, backlog);
 	gs_net_connect(gsocket);
@@ -1555,6 +1573,8 @@ GS_accept(GS *gsocket, int *err)
 	GS gs_tmp;
 	int ret;
 
+	DEBUG_SETID(gsocket);
+
 	if (err != NULL)
 		*err = 0;
 
@@ -1616,7 +1636,6 @@ gs_close(GS *gsocket)
 		FD_CLR(gsocket->fd, gsocket->ctx->w);
 		/* HERE: This was not listening socket */
 		XCLOSE(gsocket->fd);
-		gsocket->fd = -1;
 		return;
 	}
 
@@ -1635,7 +1654,6 @@ gs_close(GS *gsocket)
 		FD_CLR(sox->fd, gsocket->ctx->r);
 		FD_CLR(sox->fd, gsocket->ctx->w);
 		XCLOSE(sox->fd);
-		sox->fd = -1;
 	}
 	gsocket->net.n_sox = 0;
 
@@ -1649,6 +1667,8 @@ gs_close(GS *gsocket)
 int
 GS_close(GS *gsocket)
 {
+	DEBUG_SETID(gsocket);
+
 	DEBUGF_B("read: %"PRId64", written: %"PRId64"\n", gsocket->bytes_read, gsocket->bytes_written);
 	if (gsocket == NULL)
 		return -2;
@@ -1684,6 +1704,7 @@ int
 GS_shutdown(GS *gsocket)
 {
 	int ret;
+	DEBUG_SETID(gsocket);
 
 	if (gsocket->flags & GSC_FL_USE_SRP)
 	{
@@ -1695,7 +1716,6 @@ GS_shutdown(GS *gsocket)
 			gsocket->is_want_shutdown = 1;
 			return GS_SUCCESS;
 		}
-		gsocket->is_sent_shutdown = 1;
 		ret = gs_ssl_shutdown(gsocket);
 		return ret;
 	} else {
@@ -1826,13 +1846,15 @@ GS_read(GS *gsocket, void *buf, size_t count)
 	int err = 0;
 	// DEBUGF("GS_read(fd = %d)...\n", gsocket->fd);
 	GS_SELECT_CTX *sctx = gsocket->ctx->gselect_ctx;
+	DEBUG_SETID(gsocket);
 
 	if (gsocket->flags & GSC_FL_USE_SRP)
 	{
 #ifndef WITH_GSOCKET_SSL
 		return GS_ERR_FATAL;
 #else
-		len = gs_ssl_continue(gsocket);
+		len = gs_ssl_continue(gsocket, GS_CAN_READ);
+		// DEBUGF("gs_ssl_continue()==%zd, ssl-state=%d\n", len, gsocket->ssl_state);
 		if (len <= 0)
 			return len;
 
@@ -1877,6 +1899,7 @@ GS_read(GS *gsocket, void *buf, size_t count)
 		errno = 0;
 		gsocket->ts_net_io = GS_TV_TO_USEC(gsocket->ctx->tv_now);
 		gsocket->bytes_read += len;
+		// DEBUGF("write_pending=%d\n", gsocket->write_pending);
 		if (gsocket->write_pending == 0)
 			gs_ssl_want_io_finished(gsocket);
 		gsocket->read_pending = 0;
@@ -1885,7 +1908,10 @@ GS_read(GS *gsocket, void *buf, size_t count)
 		/* Mark if there is still data in the input buffer so another cb is done */
 #ifdef WITH_GSOCKET_SSL
 		if ((gsocket->ssl) && (SSL_pending(gsocket->ssl) > 0))
-			gs_select_set_rdata_pending(gsocket->ctx->gselect_ctx, gsocket->fd);
+		{
+			DEBUGF("rdata-pending\n");
+			gs_select_set_rdata_pending(gsocket->ctx->gselect_ctx, gsocket->fd, SSL_pending(gsocket->ssl));
+		}
 #endif
 	}
 
@@ -1944,6 +1970,7 @@ GS_SELECT_FD_SET_W(GS *gs)
 /*
  * Return 0 on WOULD_BLOCK
  * Return -1 on error
+ * Return -2 nothing to be done.
  * Return lengh on SUCCESS
  */
 ssize_t
@@ -1952,10 +1979,11 @@ GS_write(GS *gsocket, const void *buf, size_t count)
 	ssize_t len;
 	int err;
 
+	DEBUG_SETID(gsocket);
 	// If already in a stored state then modify the stored state and return to caller
 	// that to be called again (caller must not modify rfd/wfd as this is used by SSL...)
 	GS_SELECT_CTX *sctx = gsocket->ctx->gselect_ctx;
-#if 1
+	// DEBUGF("fd=%d, count=%zu is_state_saved=%d(==%d), pending=%d\n", gsocket->fd, count, sctx->is_rw_state_saved[gsocket->fd], sctx->saved_rw_state[gsocket->fd], gsocket->write_pending);
 	if (sctx->is_rw_state_saved[gsocket->fd])
 	{
 		/* HERE: *write() blocked previously or SSL_read() WANTS-WRITE */
@@ -1973,7 +2001,6 @@ GS_write(GS *gsocket, const void *buf, size_t count)
 		}
 		/* HERE: w-fd became writeable while in saved state */
 	}
-#endif 
 
 	// DEBUGF("GS_write(%zu) to fd = %d, ssl = %p\n", count, gsocket->fd, gsocket->ssl);
 
@@ -1982,9 +2009,26 @@ GS_write(GS *gsocket, const void *buf, size_t count)
 #ifndef WITH_GSOCKET_SSL
 		return -1;
 #else
-		len = gs_ssl_continue(gsocket);
+		len = gs_ssl_continue(gsocket, GS_CAN_WRITE);
 		if (len <= 0)
+		{
+			// HERE: ssl-state continued. Return.
+			DEBUGF("gs_ssl_continue()==%zd\n", len);
 			return len;
+		}
+
+		// No state to continue
+		if (count == 0)
+		{
+			// This can happen if we receive an app-ping. This sets
+			// wfd (for writing) to wake up to send the pong-reply.
+			// The write-callback is called and does not know if the SSL-state
+			// has to continue (wanted write?) or if it is an outstanding pong-reply.
+			// Thus the callback calls GS_write() and _here_ we determine that no
+			// SSL-state needed attention. The caller then sends the pong.
+			DEBUGF_C("GS_write() with no data. NO stuck state either.\n");
+			return -2;
+		}
 
 		len = SSL_write(gsocket->ssl, buf, count);
 		// DEBUGF_M("SSL_write(%zu) == %zd\n", count, len);
@@ -2080,12 +2124,6 @@ GS_usecstr(char *buf, size_t len, uint64_t usec)
 	sec -= min * 60;
 
 	*ptr = 0;
-#if 0
-	if (hr != 0)
-		snprintf(ptr, len, "%d:%02d:%02d.%03d", hr, min, sec, msec);
-	else
-		snprintf(ptr, len, "%02d:%02d.%03d", min, sec, msec);
-#endif
 
 	if (hr != 0)
 		snprintf(ptr, len, "%dhrs %2dmin %2d.%03dsec", hr, min, sec, msec);

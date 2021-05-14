@@ -41,6 +41,7 @@ GS_condis_add(GS_CONDIS *cd, int level, const char *str)
 	size_t len;
 	struct condis_line *cdl = &cd->cdl[cd->pos_add];
 
+	DEBUGF("%s\n", str);
 	len = MIN(sizeof cdl->line - 1, strlen(str));
 	memcpy(cdl->line, str, len);
 	cdl->line[len] = 0x00;
@@ -65,6 +66,20 @@ GS_condis_add(GS_CONDIS *cd, int level, const char *str)
 	cd->is_redraw_needed = 1;
 }
 
+void
+GS_condis_printf(GS_CONDIS *cd, int level, const char *fmt, ...)
+{
+	va_list ap;
+	char buf[CONDIS_LINE_MAX_LEN];
+
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof buf, fmt, ap);
+	va_end(ap);
+
+	GS_condis_add(cd, level, buf);
+}
+
+// Add "<TIMESTAMP> <str>" to console display.
 void
 GS_condis_log(GS_CONDIS *cd, int level, const char *str)
 {
@@ -106,7 +121,7 @@ GS_condis_up(GS_CONDIS *cd)
 	int max_scroll;
 	int scroll;
 	max_scroll = cd->entries - (apos - dpos);
-	scroll = MIN(3, max_scroll);
+	scroll = MIN(cd->rows, max_scroll);
 
 	cd->pos_display = (dpos + CONDIS_MAX_HISTORY - scroll) % CONDIS_MAX_HISTORY;
 	cd->is_redraw_needed = 1;
@@ -136,9 +151,12 @@ cd_write(int fd, void *buf, size_t len)
 	if (write(fd, buf, len) != len)
 		ERREXIT("write()\n");
 }
+
 /*
  * Draw the console at position and with each string
  * up to max_char length. Add '..' if string is longer...
+ *
+ * THIS WILL LEAVE THE CURSOR ASTRAY. Use CONSOLE_draw() to correct cursor position.
  */
 void
 GS_condis_draw(GS_CONDIS *cd, int force)
@@ -149,13 +167,14 @@ GS_condis_draw(GS_CONDIS *cd, int force)
 	{
 		if (cd->is_redraw_needed == 0)
 			return;
-		cd->is_redraw_needed = 0;
 	}
+	cd->is_redraw_needed = 0;
 
 	char buf[1024];
 	char *end = buf + sizeof (buf) - 1; // Space for \n
 	char *ptr = buf;
 
+	DEBUGF("Moving cursor to %d:1f\n", cd->y);
 	SXPRINTF(ptr, end - ptr, "\x1B[%d;1f", cd->y);
 	cd_write(cd->fd, buf, ptr - buf);
 

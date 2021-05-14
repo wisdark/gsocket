@@ -15,6 +15,9 @@
 #ifdef HAVE_SYS_LOADAVG_H
 # include <sys/loadavg.h> // Solaris11
 #endif
+#ifdef HAVE_SYS_ENDIAN_H
+# include <sys/endian.h>
+#endif
 #include <netinet/in.h>
 #ifdef HAVE_NETINET_IN_SYSTM_H
 # include <netinet/in_systm.h>
@@ -29,8 +32,12 @@
 #ifdef HAVE_UNISTD_H
 # include <unistd.h>
 #endif
+#ifdef HAVE_FNMATCH_H
+#include <fnmatch.h>
+#endif
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>    // Solaris11
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -40,6 +47,7 @@
 #include <libgen.h>		/* basename() */
 #include <termios.h>
 #include <pwd.h>
+#include <wordexp.h>
 #ifdef HAVE_UTMPX_H
 # include <utmpx.h>
 #endif
@@ -58,10 +66,21 @@
 #if defined __sun || defined __hpux /* Solaris, HP-UX */
 # include <stropts.h>
 #endif
+#include <locale.h>
 #include <openssl/ssl.h>
 #include <openssl/srp.h>
 #include <gsocket/gsocket.h>
 #include <gsocket/gs-select.h>
+#include "filetransfer.h"
+
+#ifdef __sun
+# ifdef HAVE_OPEN64
+#  define IS_SOL10      1   // Solaris 10
+# else
+#  define IS_SOL11      1   // Solaris 11
+# endif
+# define IS_SOLARIS     1
+#endif
 
 #ifndef O_NOCTTY
 # warning "O_NOCTTY not defined. Using 0."
@@ -71,6 +90,29 @@
 // Older fbsd's dont have this defined
 #ifndef UT_NAMESIZE
 # define UT_NAMESIZE	32
+#endif
+
+#if defined(__sun)
+# if !defined(be64toh) // Solaris11
+#  define be64toh(x) ntohll(x)
+#  define htobe64(x) htonll(x)
+# endif
+# if !defined(htonll) // Solaris10
+#  if __BIG_ENDIAN__
+#   define htonll(x) (x)
+#   define ntohll(x) (x)
+#  else
+#   define htonll(x) ((uint64_t)htonl((x) & 0xFFFFFFFF) << 32) | htonl((uint64_t)(x) >> 32)
+#   define ntohll(x) ((uint64_t)ntohl((x) & 0xFFFFFFFF) << 32) | ntohl((uint64_t)(x) >> 32)
+#  endif
+# endif
+#endif
+
+#ifndef htonll
+# define htonll(x)	htobe64(x)
+#endif
+#ifndef ntohll
+# define ntohll(x)  be64toh(x)
 #endif
 
 struct _gopt
@@ -96,12 +138,21 @@ struct _gopt
 	int is_socks_server;	/* -S flag */
 	int is_multi_peer;		/* -p / -S / -d [client & server] */
 	int is_daemon;
+	int is_watchdog;        // Never die but die if stdin closes
 	int is_logfile;
-	int is_quite;
+	int is_quiet;
 	int is_win_resized;     // window size changed (signal)
 	int is_console;		    // console is being displayed
 	int is_pong_pending;    // Server: Answer to PING waiting to be send
 	int is_want_ping;       // Client: Wants to send a ping
+	int is_want_pwd;        // Client: Wants server to send cwd
+	int is_pwdreply_pending; // Server: Answer to pwd-request
+	int is_want_chdir; 
+	int is_want_ids_on;     
+	int is_want_authcookie;
+	int is_send_authcookie;
+	int is_internal;        // -I flag
+	int is_udp;             // Port forwarding only. GSRN is always TCP.
 	uint64_t ts_ping_sent;  // TimeStamp ping sent
 	fd_set rfd, r;
 	fd_set wfd, w;
@@ -159,19 +210,26 @@ struct _peer
 	int is_fd_connected;
 	int is_pty_first_read;		/* send stty hack */
 	int is_stty_set_raw;		/* Client only */
+	int is_received_gs_eof;     // EOF from GSRN
 	/* For Statistics */
 	int id;			/* Stats: assign an ID to each pere */
 	struct _socks socks;
 	GS_PKT pkt;		// In-band data for interactive shell (-i)
+	GS_FT ft;       // Filetransfer (-i)
 	GS_LIST logs;   // Queue for log messages from Server to Client (-i)
 	int is_pending_logs; // Log files need to be send to peer.
 	GS_LIST_ITEM *ids_li;  // Peer is interested in global IDS logs
+	pid_t pid;
+	uint64_t ts_peer_io;   // TimeStamp of last peer I/O (e.g. UDP, stdin, ...)
+	GS_BUF udp_buf;         // UDP un-stacker (for -u)
+	GS_EVENT event_peer_timeout;
 };
 
 #define GSC_FL_IS_SERVER		(0x01)
 
 
-extern struct _gopt gopt;
+extern struct _gopt gopt; // declared in utils.c
+
 #define xfprintf(fp, a...) do {if (fp != NULL) { fprintf(fp, a); fflush(fp); } } while (0)
 
 #define int_ntoa(x)	inet_ntoa(*((struct in_addr *)&x))
@@ -194,16 +252,34 @@ extern struct _gopt gopt;
 #define D_BYEL(a)	"\033[1;33m"a"\033[0m"
 #define D_BBLU(a)	"\033[1;34m"a"\033[0m"
 #define D_BMAG(a)	"\033[1;35m"a"\033[0m"
+
 #ifdef DEBUG
-# define DEBUGF(a...)   do{xfprintf(gopt.err_fp, "DEBUG %s:%d: ", __func__, __LINE__); xfprintf(gopt.err_fp, a); }while(0)
-# define DEBUGF_R(a...) do{xfprintf(gopt.err_fp, "DEBUG %s:%d: ", __func__, __LINE__); xfprintf(gopt.err_fp, "\033[1;31m"); xfprintf(gopt.err_fp, a); xfprintf(gopt.err_fp, "\033[0m"); }while(0)
-# define DEBUGF_G(a...) do{xfprintf(gopt.err_fp, "DEBUG %s:%d: ", __func__, __LINE__); xfprintf(gopt.err_fp, "\033[1;32m"); xfprintf(gopt.err_fp, a); xfprintf(gopt.err_fp, "\033[0m"); }while(0)
-# define DEBUGF_B(a...) do{xfprintf(gopt.err_fp, "DEBUG %s:%d: ", __func__, __LINE__); xfprintf(gopt.err_fp, "\033[1;34m"); xfprintf(gopt.err_fp, a); xfprintf(gopt.err_fp, "\033[0m"); }while(0)
-# define DEBUGF_Y(a...) do{xfprintf(gopt.err_fp, "DEBUG %s:%d: ", __func__, __LINE__); xfprintf(gopt.err_fp, "\033[1;33m"); xfprintf(gopt.err_fp, a); xfprintf(gopt.err_fp, "\033[0m"); }while(0)
-# define DEBUGF_M(a...) do{xfprintf(gopt.err_fp, "DEBUG %s:%d: ", __func__, __LINE__); xfprintf(gopt.err_fp, "\033[1;35m"); xfprintf(gopt.err_fp, a); xfprintf(gopt.err_fp, "\033[0m"); }while(0)
-# define DEBUGF_C(a...) do{xfprintf(gopt.err_fp, "DEBUG %s:%d: ", __func__, __LINE__); xfprintf(gopt.err_fp, "\033[1;36m"); xfprintf(gopt.err_fp, a); xfprintf(gopt.err_fp, "\033[0m"); }while(0)
-# define DEBUGF_W(a...) do{xfprintf(gopt.err_fp, "DEBUG %s:%d: ", __func__, __LINE__); xfprintf(gopt.err_fp, "\033[1;37m"); xfprintf(gopt.err_fp, a); xfprintf(gopt.err_fp, "\033[0m"); }while(0)
-#else
+struct _g_debug_ctx
+{
+	struct timeval tv_last;
+	struct timeval tv_now;
+};
+
+extern struct _g_debug_ctx g_dbg_ctx; // declared in utils.c
+
+#define DEBUGF_T(xcolor, a...) do { \
+	gettimeofday(&g_dbg_ctx.tv_now, NULL); \
+	if (g_dbg_ctx.tv_last.tv_sec == 0) { memcpy(&g_dbg_ctx.tv_last, &g_dbg_ctx.tv_now, sizeof g_dbg_ctx.tv_last); } \
+	xfprintf(gopt.err_fp, "DEBUG %4"PRIu64" %s:%d %s", GS_TV_TO_MSEC(&g_dbg_ctx.tv_now) - GS_TV_TO_MSEC(&g_dbg_ctx.tv_last), __func__, __LINE__, xcolor?xcolor:""); \
+	memcpy(&g_dbg_ctx.tv_last, &g_dbg_ctx.tv_now, sizeof g_dbg_ctx.tv_last); \
+	xfprintf(gopt.err_fp, a); \
+	if (xcolor) { xfprintf(gopt.err_fp, "\033[0m"); } \
+} while (0)
+
+# define DEBUGF(a...) do{DEBUGF_T(NULL, a); } while(0)
+# define DEBUGF_R(a...) do{DEBUGF_T("\033[1;31m", a); } while(0)
+# define DEBUGF_G(a...) do{DEBUGF_T("\033[1;32m", a); } while(0)
+# define DEBUGF_B(a...) do{DEBUGF_T("\033[1;34m", a); } while(0)
+# define DEBUGF_Y(a...) do{DEBUGF_T("\033[1;33m", a); } while(0)
+# define DEBUGF_M(a...) do{DEBUGF_T("\033[1;35m", a); } while(0)
+# define DEBUGF_C(a...) do{DEBUGF_T("\033[1;36m", a); } while(0)
+# define DEBUGF_W(a...) do{DEBUGF_T("\033[1;37m", a); } while(0)
+#else // DEBUG
 # define DEBUGF(a...)
 # define DEBUGF_R(a...)
 # define DEBUGF_G(a...)
@@ -212,6 +288,7 @@ extern struct _gopt gopt;
 # define DEBUGF_M(a...)
 # define DEBUGF_C(a...)
 # define DEBUGF_W(a...)
+# define DEBUGF_A(a...)
 #endif
 
 // Increase ptr by number of characters added to ptr.
@@ -219,6 +296,9 @@ extern struct _gopt gopt;
 	size_t n = snprintf(ptr, len, a); \
 	ptr += MIN(n, len); \
 } while(0)
+
+// Overcome GCC warning for truncation. Abort() if truncation happen.
+#define SNPRINTF_ABORT(...)	(snprintf(__VA_ARGS__) < 0 ? abort() : (void)0)
 
 #define VOUT(level, a...) do { \
 	if (level > gopt.verboselevel) \
@@ -262,16 +342,23 @@ extern struct _gopt gopt;
         fd = -1; \
 } while (0)
 
+#define XFCLOSE(fp)		do { \
+		if (fp == NULL) { DEBUGF_R("*** WARNING *** Closing BAD fp\n"); break; } \
+		fclose(fp); \
+		fp = NULL; \
+} while (0)
+
+
 #define XFD_SET(fd, set) do { \
         if (fd < 0) { DEBUGF_R("WARNING: FD_SET(%d, )\n", fd); break; } \
         FD_SET(fd, set); \
 } while (0)
 
 #ifdef DEBUG
-# define HEXDUMP(a, len)        do { \
-        int n = 0; \
-        xfprintf(gopt.err_fp, "%s:%d HEX ", __FILE__, __LINE__); \
-        while (n < len) xfprintf(gopt.err_fp, "%2.2x", ((unsigned char *)a)[n++]); \
+# define HEXDUMP(a, _len)        do { \
+        size_t _n = 0; \
+        xfprintf(gopt.err_fp, "%s:%d HEX[%zd] ", __FILE__, __LINE__, _len); \
+        while (_n < (_len)) xfprintf(gopt.err_fp, "%2.2x", ((unsigned char *)a)[_n++]); \
         xfprintf(gopt.err_fp, "\n"); \
 } while (0)
 # define HEXDUMPF(a, len, m...) do{xfprintf(gopt.err_fp, m); HEXDUMP(a, len);}while(0)

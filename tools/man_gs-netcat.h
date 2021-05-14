@@ -7,7 +7,7 @@ NAME\n\
      remote host. Securely.\n\
 \n\
 SYNOPSIS\n\
-     gs-netcat [-rlgqwCTSDi] [-s secret] [-k keyfile] [-L logfile] [-d IP]\n\
+     gs-netcat [-rlgqwCTSDiu] [-s secret] [-k keyfile] [-L logfile] [-d IP]\n\
 	       [-p port] [-e cmd]\n\
 \n\
 DESCRIPTION\n\
@@ -33,53 +33,93 @@ DESCRIPTION\n\
 	   o   and much, much more.\n\
 \n\
 OPTIONS\n\
-     -s secret\n\
-	     A password chosen by the user. Both users need to use the same\n\
-	     password to connect.\n\
+     -C      Disable encryption and use clear-text instead. Use with caution.\n\
 \n\
-     -k file\n\
-	     A file containing the password.\n\
+     -d ip   Destination IPv4 address for port forwarding.\n\
+\n\
+     -D      Daemon & Watchdog mode. Start gs-netcat as a background process\n\
+	     and restart if killed.\n\
+\n\
+     -e cmd  Execute command and send output to the connected client. Needs\n\
+	     -l.\n\
 \n\
      -g      Generate a secure random password and output it to standard out-\n\
 	     put.\n\
 \n\
-     -l      Server mode. The default mode is client.\n\
+     -i      Interactive login shell. The server spawns a true PTY login\n\
+	     shell. The client acts as a true PTY client (with Ctrl-C etc\n\
+	     working). The client can terminate the session by typing 'Ctrl-e\n\
+	     q' at any time or by typing 'exit'. The server supports multiple\n\
+	     clients at the same time.\n\
 \n\
-     -q      Quite mode. Do not output any warnings or errors.\n\
+     -k file\n\
+	     A file containing the password.\n\
 \n\
-     -w      Client to wait for the listening server to become available.\n\
+     -l      Server/Listening mode. The default mode is client.\n\
+\n\
+     -L file\n\
+	     Log file [default: standard out]\n\
+\n\
+     -p port\n\
+	     Port to listen on or to forward traffic to [1-65535].\n\
+\n\
+     -q      Quiet mode. Do not output any warnings or errors.\n\
 \n\
      -r      Receive-only. Do not send any data. Terminate when no more data\n\
 	     is available for reading.\n\
 \n\
-     -C      Disable encryption and use clear-text instead. Use with caution.\n\
+     -s secret\n\
+	     A password chosen by the user. Both users need to use the same\n\
+	     password to connect.\n\
+\n\
+     -S      Act as a SOCKS4/4a/5 server. The server acts as a SOCKS4/4a/5\n\
+	     proxy. It allows multiple gs-netcat clients to (securely) relay\n\
+	     traffic via the server. Needs -l.\n\
 \n\
      -T      Use TOR. The gs-netcat tool will connect via TOR to the GSRN.\n\
 	     This requires TOR to be installed and running. The IP and PORT of\n\
 	     the TOR server can be set using environment variables.\n\
 \n\
-     -S      Server. Act as a Socks4/4a/5 server. Needs -l. The server acts as\n\
-	     a Socks4/4a/5 proxy. It allows multiple gs-netcat clients to\n\
-	     (securely) relay traffic via the server.\n\
+     -u      Use UDP instead of TCP for port forwarding. Needs -p.\n\
 \n\
-     -D      Server. Daemon & Watchdog mode.  gs-netcat will run as a back-\n\
-	     ground process and restart itself if killed.\n\
+     -w      Client to wait for the listening server to become available.\n\
 \n\
-     -e cmd  Server. Execute command and send output to the connected client.\n\
+CONSOLE\n\
+     The interactive login shell ( -i ) has a command console. Pressing 'Ctrl-\n\
+     e c' (e for EEEElite) opens the command console. The command console dis-\n\
+     plays the following information:\n\
 \n\
-     -d ip   IPv4 address for port forwarding.\n\
+	   o   Latency (in milliseconds) to the remote host\n\
+	   o   Warning when a user logs into the system or becomes active\n\
+	   o   Data throughput\n\
+	   o   File transfer logs\n\
+     Type 'help' for a list of available commands.\n\
 \n\
-     -p port\n\
-	     TCP port to listen on or to forward traffic to.\n\
-\n\
-     -i      Interactive login shell. The server spawns a true PTY login\n\
-	     shell. The client acts as a true PTY client (with Ctrl-C etc\n\
-	     working). The client can terminate the session by typing '~.' at\n\
-	     any time or by typing 'exit'. The server supports multiple\n\
-	     clients at the same time.\n\
-\n\
-\n\
-     port can be a numerical value between 1-65535.\n\
+FILETRANSFER\n\
+     File transfer is available from the command console. Files are trans-\n\
+     ferred with the permission and modification timestamp unchanged. Par-\n\
+     tially transferred files are re-started where the transfer was left off.\n\
+     The 'put' command is used for uploading:\n\
+	   put foobar.txt\n\
+	   put $HOME/foobar.txt\n\
+	   put /tmp/*.log\n\
+	   put $(find. -type f -name '*.c')\n\
+     (The above example shows Shell Variable substitution and word expansion)\n\
+     It is possible to limit the amount of path information that is sent as\n\
+     implied directories for each path you specify. You can insert a dot and a\n\
+     slash into the source path, like this:\n\
+	   put /foo/./bar/baz.c\n\
+     That would create /tmp/bar/baz.c on the remote machine.  The 'get' com-\n\
+     mand is used for downloading:\n\
+	   get foobar.txt\n\
+	   get $(find /var/./ -name '*.log')\n\
+     Transferring a directory automatically transfers all files and directo-\n\
+     ries within that directory (recursively):\n\
+	   get /var/log\n\
+	   get /\n\
+     The first command transfers all directories and files in /var/log/*. The\n\
+     latter command transfers the entire filesystem.  Multiple get/put com-\n\
+     mands can be scheduled at the same time.\n\
 \n\
 EXAMPLES\n\
      Example 1 - Listen for a new connection using the password 'MySecret':\n\
@@ -106,11 +146,11 @@ EXAMPLES\n\
      Client to read 'warez.tar.gz' and pipe it to the server.\n\
 	   $ gs-netcat -s MySecret <warez.tar.gz\n\
 \n\
-     Example 5 - Server to act as a Socks4/4a/5 server:\n\
+     Example 5 - Server to act as a SOCKS4/4a/5 server:\n\
 	   $ gs-netcat -s MySecret -l -S\n\
 \n\
      Client to listen on TCP port 1080 and forward any new connection to the\n\
-     server's Socks server:\n\
+     server's SOCKS server:\n\
 	   $ gs-netcat -s MySecret -p 1080\n\
 \n\
      Example 6 - TCP Port Forward all connections to 192.168.6.7:22. Server:\n\
@@ -144,7 +184,8 @@ EXAMPLES\n\
 	   SHELL=\"/bin/bash\" /bin/bash -c \"cd $HOME; exec -a rsyslogd\n\
 	   /usr/local/bin/gs-netcat\"\n\
 \n\
-     The follwing line in /etc/rc.local starts a port-forward to 127.0.0.1:22:\n\
+     The following line in /etc/rc.local starts a port-forward to\n\
+     127.0.0.1:22:\n\
 	   GSOCKET_ARGS=\"-k MySecret2 -lqD -d 127.1 -p22\" /bin/bash -c \"exec\n\
 	   -a rsyslogd /usr/local/bin/gs-netcat\"\n\
 \n\
@@ -159,8 +200,6 @@ EXAMPLES\n\
 \n\
      Client to connect to the backdoor:\n\
 	   $ gs-netcat -s MySecret -i\n\
-\n\
-\n\
 \n\
 ENVIRONMENT\n\
      The following environment variables can be set to control the behavior of\n\
@@ -178,7 +217,6 @@ ENVIRONMENT\n\
 	   A string containing additional command line parameters. First the\n\
 	   normal command line parameters are processed and then the command\n\
 	   line parameters from GSOCKET_ARGS.\n\
-\n\
 \n\
 SECURITY\n\
      Passing the password as command line parameter is not secure. Consider\n\
@@ -222,15 +260,12 @@ SECURITY\n\
      7. SRP has Perfect Forward Secrecy. This means that past sessions can not\n\
      be decrypted even if the password becomes known.\n\
 \n\
-\n\
 NOTES\n\
      The latest version is available from https://github.com/hacker-\n\
      schoice/gsocket/.\n\
 \n\
-\n\
 SEE ALSO\n\
-     gs-sftp(1), gs-mount(1), blitz(1), nc(1), socat(1)\n\
-\n\
+     gsocket(1), gs-sftp(1), gs-mount(1), blitz(1), nc(1), socat(1)\n\
 \n\
 BUGS\n\
      Efforts have been made to have gs-netcat \"do the right thing\" in all its\n\

@@ -41,10 +41,12 @@
 #define GS_TOKEN_SIZE 				(16)	/* 128 bit */
 
 #define GS_TV_TO_USEC(tv)		((uint64_t)(tv)->tv_sec * 1000000 + (tv)->tv_usec)
+#define GS_TV_TO_MSEC(tv)		((uint64_t)(tv)->tv_sec * 1000 + (tv)->tv_usec/1000)
 #define GS_TV_DIFF(tv_a, tv_b)	(GS_TV_TO_USEC(tv_b) - GS_TV_TO_USEC(tv_a))
-#define GS_SEC_TO_USEC(sec)		((uint64_t)sec * 1000000)
-#define GS_MSEC_TO_USEC(ms)		((uint64_t)ms * 1000)
-#define GS_USEC_TO_SEC(usec)	(usec / 1000000)
+#define GS_SEC_TO_USEC(sec)		((uint64_t)(sec) * 1000000)
+#define GS_MSEC_TO_USEC(ms)		((uint64_t)(ms) * 1000)
+#define GS_USEC_TO_SEC(usec)	((usec) / 1000000)
+#define GS_USEC_TO_MSEC(usec)	((usec) / 1000)
 #define GS_USEC_TO_TV(tv, usec)	do { (tv)->tv_sec = (usec) / 1000000; (tv)->tv_usec = (usec) % 1000000; } while(0)
 
 #define GS_SECRET_MAX_LEN               (256 / 8)       /* max length in bytes */
@@ -56,6 +58,7 @@
 #include <gsocket/gs-select.h>
 #include <gsocket/packet.h>
 #include <gsocket/gs-readline.h>
+#include <gsocket/buf.h>
 
 /* ###########################
  * ### PROTOCOL DEFINITION ###
@@ -292,6 +295,12 @@ enum ssl_state_t {
 };
 #endif
 
+enum gs_rw_state_t {
+	GS_CAN_READ = 0x01,
+	GS_CAN_WRITE = 0x02,
+	GS_CAN_RW = 0x03
+};
+
 /*
  * A specific GS connection with a single GSOCKET-ID.
  * There can be multiple connection per GSOCKET-ID (eventually).
@@ -314,6 +323,7 @@ typedef struct
 	int is_want_shutdown;	/* Call GS_shutdown() after SRP completion */
 	uint8_t token[GS_TOKEN_SIZE];
 	int eof_count;			/* How many EOF received (needed for ssl compat) */
+	int status_code;
 #ifdef WITH_GSOCKET_SSL
 	SSL_CTX *ssl_ctx;
 	SRP_VBASE *srpData;		/* Verifier is identical 4 all conns on same GS */
@@ -371,6 +381,9 @@ uint32_t GS_hton(const char *hostname);
 void GS_SELECT_FD_SET_W(GS *gs);
 
 void GS_daemonize(FILE *logfp);
+uint64_t GS_usec(void);
+void GS_format_bps(char *dst, size_t size, int64_t bytes, const char *suffix);
+char *GS_getpidwd(pid_t pid);
 
 const char *GS_gen_secret(void);
 const char *GS_user_secret(GS_CTX *ctx, const char *file, const char *sec_str);

@@ -1,5 +1,8 @@
 #! /usr/bin/env bash
 
+
+[[ $(basename "$0") = "gs_funcs" ]] && { echo "Use gsocket, gs-netcat, gs-sftp, gs-mount or blitz instead."; exit 1; }
+
 # Find a sftp-server binary
 find_binary()
 {
@@ -19,7 +22,7 @@ find_binary()
 
 read_password()
 {
-	echo -n >&2 "Enter Secret (or press Enter to generate): "
+	echo -n >&2 "${GS_PRFX}Enter Secret (or press Enter to generate): "
 	read -r password
 	if [[ -z "${password}" ]]; then
 		password=$(${GS_NETCAT_BIN} -g)
@@ -161,6 +164,44 @@ ls ./../denied/exist-denied.txt"
 	rm -rf "${ROOTDIR}/sftp-server.sh" &>/dev/null
 }
 
+
+gs_find_so_single()
+{
+	[[ -e "${1}/${2}" ]] && { echo "$(cd "${1}" || exit; pwd)""/${2}"; }
+}
+
+arrayContains()
+{
+	local e match="$1"
+	shift
+	for e; do [[ "$e" == "$match" ]] && return 0; done
+	return 1
+}
+
+# Search for the dynamic shared object file.
+# 1. Try $basedir
+# 2. Try ${basedir}/../lib
+# 3. Try /usr/lib
+# 4. Try /usr/local/lib
+# Return absolute path to DSO. 
+gs_find_so()
+{
+	local DL=("${BASEDIR}")
+	# Debian packaging requires libs in /usr/lib/x86_64-linux-gnu  :/
+	if command -v dpkg-architecture &>/dev/null; then
+		DL+=("/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)")
+	fi
+
+	DL+=("${1}/lib") # This is either GS_PREFIX/lib or BASEDIR/../lib
+	arrayContains "/usr/lib" "${DL[@]}" || DL+=("/usr/lib")
+	arrayContains "/usr/local/lib" "${DL[@]}" || DL+=("/usr/local/lib")
+
+	for dir in "${DL[@]}"; do
+		res=$(gs_find_so_single "${dir}" "${2}")
+		[[ -z "$res" ]] || { echo "$res"; return; }
+	done
+}
+
 gs_init()
 {
 	GS_NETCAT_BIN="gs-netcat"
@@ -173,11 +214,19 @@ gs_init()
 		EXE=".exe"
 	fi
 
-	UCHROOT_BIN="${BASEDIR}/gs_uchroot_so${EXE}"
-	[[ -f "${UCHROOT_BIN}" ]] || { echo >&2 "${UCHROOT_BIN} not found."; exit 2; }
+	# To find sftp-server and DSO's in PREFIX/lib
+	PREFIX="$GS_PREFIX"
+	[[ -z "$PREFIX" ]] && PREFIX="$(cd "$(dirname "${0}")/../" || exit; pwd)"
 
-	# To find sftp-server in PREFIX/lib
-	PREFIX="$(cd "$(dirname "${0}")/../" || exit; pwd)"
+	# on OSX the dl-files are called .bundle (not .dylib) but it is generally
+	# accepted to call them .so. OSX keep those is /System/Library/gsocket
+	# but automake insists on ${PREFIX}/lib
+	UCHROOT_BIN=$(gs_find_so "$PREFIX" "gsocket_uchroot_dso.so.0${EXE}")
+	[[ -z "$UCHROOT_BIN" ]] && { echo >&2 "gsocket: gsocket_uchroot_dso.so.0${EXE} not found."; exit 5; }
+	# shellcheck disable=SC2034 # appears unused. Verify use (or export if used externally).
+	GS_SO_BIN=$(gs_find_so "$PREFIX" "gsocket_dso.so.0${EXE}")
+	[[ -z "$GS_SO_BIN" ]] && { echo >&2 "gsocket: gsocket_dso.so.0${EXE} not found."; exit 5; }
+
 	# shellcheck disable=SC2034 # appears unused. Verify use (or export if used externally).
 	BIN_NAME="$(basename "${0}")"
 
@@ -205,8 +254,13 @@ do_getopt()
 	OPTERR=0
 	FL_NEED_PASSWORD=1
 	IS_UCHROOT=1
+	# Check if -s or -k is already supplied in environment and dont ask again.
+	[[ "$GSOCKET_ARGS" =~ ^'-s' ]] && unset FL_NEED_PASSWORD
+	[[ "$GSOCKET_ARGS" =~ ' -s' ]] && unset FL_NEED_PASSWORD
+	[[ "$GSOCKET_ARGS" =~ ^'-k' ]] && unset FL_NEED_PASSWORD
+	[[ "$GSOCKET_ARGS" =~ ' -k' ]] && unset FL_NEED_PASSWORD
 	# shellcheck disable=SC2220 # Invalid flags are not handled. Add a *) case.
-	while getopts ":hURgls:k:L:" opt; do
+	while getopts ":qhURgls:k:L:" opt; do
 		case ${opt} in
 			s )
 				GSNC_ENV_ARGS[${#GSNC_ENV_ARGS[@]}]="-s"	# Add to end of array
@@ -228,6 +282,10 @@ do_getopt()
 				;;
 			h )
 				my_usage
+				;;
+			q )
+				IS_QUIET=1
+				ARGS_NEW[${#ARGS_NEW[@]}]="-q"
 				;;
 			l )
 				# shellcheck disable=SC2034 # appears unused. Verify use (or export if used externally).
@@ -268,10 +326,15 @@ env_arg_init()
 	[[ -n "$GSOCKET_ARGS" ]] && GSOCKET_ARGS+=" "
 	if [[ -n "$FL_NEED_PASSWORD" ]]; then
 		password=$(read_password)
-		echo "=Secret         :\"${password}\""
+		# shellcheck disable=SC2034 # GSOCKET_SECRET appears unused => It's used in 'gs'
+		GSOCKET_SECRET="${password}"
+		echo "${GS_PRFX}=Secret         :\"${password}\""
 		GSNC_ENV_ARGS[${#GSNC_ENV_ARGS[@]}]="-s"		# Add to end of array			
 		GSNC_ENV_ARGS[${#GSNC_ENV_ARGS[@]}]="$password"	# Add to end of array			
 	fi
+	# Have to output it here because gs-netcat might be started from withing
+	# sshfs or sftpd where stderr is no longer available to gs-netcat
+	[[ -n "$IS_QUIET" ]] || echo >&2 "${GS_PRFX}=Encryption     : SRP-AES-256-CBC-SHA-End2End (Prime: 4096 bits)"
 	ENV_ARGS="${GSOCKET_ARGS}${GSNC_ENV_ARGS[*]}"
 }
 
@@ -289,7 +352,7 @@ sftp_server_start()
 		if [[ -n "${IS_UCHROOT}" ]]; then
 			ROOTDIR=$(mktemp -d -t thc-gs-sftp-XXXXXXXXXXXXXXX) 
 		fi
-		SFTP_SERVER_BIN=$(find_binary sftp-server${EXE} "$PREFIX"/lib /opt/csw/libexec /usr/lib /usr/local/lib /usr/libexec /usr/libexec/openssh /usr/lib/ssh /usr/sbin)
+		SFTP_SERVER_BIN=$(find_binary sftp-server${EXE} "${PREFIX}/lib" /opt/csw/libexec /usr/lib /usr/local/lib /usr/libexec /usr/libexec/openssh /usr/lib/ssh /usr/sbin)
 		PRELOAD="LD_PRELOAD=${UCHROOT_BIN}"
 	fi
 	[[ -z "${SFTP_SERVER_BIN}" ]] && { echo >&2 "sftp-server binary not found."; exit 1; }
@@ -300,7 +363,7 @@ sftp_server_start()
 	# Whitelist of commands sftp-server should allow (most are not needed
 	# by sftp but for sshfs)
 	# *** WARNING ***: If you add a string here you also must make sure that
-	# gs_uchroot checks the command for uchroot-escape.
+	# gsocket_uchroot_dso checks the command for uchroot-escape.
 	SFTP_ARGS[${#SFTP_ARGS[@]}]="-p"
 	SFTP_ARGS[${#SFTP_ARGS[@]}]="open,opendir,mkdir,remove,rmdir,symlink,hardlink,stat,posix-rename,statvfs,setstat,fsetstat,fstat,lstat,readdir,realpath,write,read,close"
 
@@ -315,7 +378,7 @@ sftp_server_start()
 		echo -e >&2 "\033[1;31mWARNING\033[0m: uchroot disabled. Allowing access to *ALL* files on this host."
 		unset PRELOAD
 	fi
-	GSOCKET_ARGS="${ENV_ARGS}" exec "${GS_NETCAT_BIN}" "${ARGS_NEW[@]}" -e "${PRELOAD} ${SFTP_SERVER_BIN} ${SFTP_ARGS[*]} 2>/dev/null"
+	GSOCKET_NO_GREETINGS="1" GSOCKET_ARGS="${ENV_ARGS}" exec "${GS_NETCAT_BIN}" "${ARGS_NEW[@]}" -e "${PRELOAD} ${SFTP_SERVER_BIN} ${SFTP_ARGS[*]} 2>/dev/null"
 }
 
 

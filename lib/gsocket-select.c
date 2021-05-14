@@ -96,10 +96,10 @@ gs_select_rw_restore_state(GS_SELECT_CTX *ctx, int fd, char *idstr)
 }
 
 void
-gs_select_set_rdata_pending(GS_SELECT_CTX *ctx, int fd)
+gs_select_set_rdata_pending(GS_SELECT_CTX *ctx, int fd, int len)
 {
 	ctx->rdata_pending_count++;
-	ctx->rdata_pending[fd] = 1;
+	ctx->rdata_pending[fd] = len;
 }
 
 static void
@@ -154,7 +154,7 @@ GS_select(GS_SELECT_CTX *ctx)
 			/* HERE: Call to GS_read() needed because there is still
 			 * data in the input buffer (not i/o buffer).
 			 */
-			DEBUGF_Y("Pending data in read input buffer :>\n");
+			DEBUGF_Y("fd=%d Pending data in SSL read input buffer (len=%d):>\n", i, ctx->rdata_pending[i]);
 			ctx->rdata_pending_count--;
 			call_item(ctx, &ctx->mgr_r[i], i);
 		}
@@ -237,12 +237,12 @@ GS_select(GS_SELECT_CTX *ctx)
 					}
 				}
 
-				// DEBUGF_B("CTX-W: %c fd=%d\n", c, i);
+				// DEBUGF_B("call_item: %c fd=%d\n", c, i);
 				XASSERT(item->func != NULL, "%c fd = %d has no function to call\n", c, i);
 				call_item(ctx, item, i);
 				n--;
 			} /* FD_ISSET(i, ctx->w) */
-		} /* select() */
+		} /* for () */
 
 		/* Time to return control to caller? */
 		if (ctx->emgr.is_return_to_caller)
@@ -276,6 +276,7 @@ GS_SELECT_del_cb(GS_SELECT_CTX *ctx, int fd)
 	FD_CLR(fd, ctx->wfd);
 	FD_CLR(fd, ctx->r);
 	FD_CLR(fd, ctx->w);
+	ctx->blocking_func[fd] = 0;
 	/* Calcualte new max-fd */
 	int i;
 #ifdef DEBUG
@@ -327,6 +328,7 @@ GS_SELECT_add_cb_r(GS_SELECT_CTX *ctx, gselect_cb_t func, int fd, void *arg, int
 	ctx->mgr_r[fd].cb_arg = arg;
 	ctx->mgr_r[fd].cb_val = val;
 	ctx->max_fd = MAX(ctx->max_fd, fd);
+	ctx->blocking_func[fd] = 0;
 }
 
 void
@@ -337,6 +339,7 @@ GS_SELECT_add_cb_w(GS_SELECT_CTX *ctx, gselect_cb_t func, int fd, void *arg, int
 	ctx->mgr_w[fd].cb_arg = arg;
 	ctx->mgr_w[fd].cb_val = val;
 	ctx->max_fd = MAX(ctx->max_fd, fd);
+	ctx->blocking_func[fd] = 0;
 }
 
 void

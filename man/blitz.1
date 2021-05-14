@@ -6,18 +6,16 @@
 .Nd Securely transfer files between two workstations through NAT/Firewall.
 .Sh SYNOPSIS
 .Nm blitz
-.Bk -words
 .Op Fl lT
 .Op Fl s Ar secret
 .Op Fl k Ar keyfile
 .Op Fl f Ar list
 .Op Fl o Ar RSOPT=
 .Op Ar files ...
-.Ek
 .Sh DESCRIPTION
 The
 .Nm
-utility is a wrapper script for gs-netcat and rsync. It allows to send files from one workstation to another workstation via the Global Socket Relay Network (GSRN).
+utility is a wrapper script for gs-netcat and rsync. It allows one to send files from one workstation to another workstation via the Global Socket Relay Network (GSRN).
 .Pp
 A typical use-case is where both workstations are separated by a Firewall or NAT and not able to establish a direct connection between each other. 
 .Pp
@@ -45,7 +43,7 @@ See
 .Xr gs-netcat(1)
 for more options.
 .Sh EXAMPLES
-Listen for clients with password \'MySecret\':
+Listen for clients with password 'MySecret':
 .Dl $ mkdir /tmp/foo && cd /tmp/foo
 .Dl $ blitz -s MySecret -l
 .Pp
@@ -61,15 +59,15 @@ It is also possible to limit the amount of path information that is sent as impl
 The received files will be stored to /tmp/foo/ssh/ instead of /tmp/foo/etc/ssh.
 .Pp
 Copy recursively and limit bandwidth to 10kB/sec:
-.Dl $ blitz -s MySecret -o \'RSOPT=--bwlimit=10\' /usr/./share
+.Dl $ blitz -s MySecret -o 'RSOPT=--bwlimit=10' /usr/./share
 .Pp
 Copy the entire root file-system:
-.Dl $ blitz -s MySecret -o \'RSOPT=-x\' /
+.Dl $ blitz -s MySecret -o 'RSOPT=-x' /
 .Pp
 Copy specific files read from standard input:
 .Dl $ find\ . -name '*.conf' | blitz -s MySecret -f \-
 .Pp
-Run a permanent server (daemon) trough TOR:
+Run a permanent server (daemon) through TOR:
 .Dl $ blitz -s MySecret -l -D -T
 .Pp
 .Sh ENVIRONMENT
@@ -78,6 +76,7 @@ See
 for a list of supported environment variables.
 .Pp
 .Sh SEE ALSO
+.Xr gsocket(1) ,
 .Xr gs-netcat(1) ,
 .Xr gs-sftp(1) ,
 .Xr gs-mount(1) ,
@@ -87,7 +86,3 @@ for a list of supported environment variables.
 Efforts have been made to have
 .Nm
 "do the right thing" in all its various modes. If you believe that it is doing the wrong thing under whatever circumstances, please notify me (skyper@thc.org) and tell me how you think it should behave.
-
-
-
-

