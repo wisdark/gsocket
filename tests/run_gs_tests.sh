@@ -15,7 +15,7 @@
 # # delete all after use:
 # tc qdisc del dev ${DEV} root
 
-# depend on: md5sum, bc, rsync, netstat, netcat, dd, ssh, sshd
+# depend on: md5sum, rsync, netstat, netcat, dd, ssh, sshd
 
 # Debian packaging: Force CWD to ./tests/
 BASEDIR="$(cd "$(dirname "${0}")" || exit; pwd)"
@@ -38,11 +38,10 @@ PATH=${GS_BINDIR}:/usr/local/bin:$PATH
 
 # printf "#! /bin/bash\nexec nc\n" >gs_nc
 SLEEP_WD=20	# Max seconds to wait for a process to finish receiving...
-command -v md5 >/dev/null 2>&1 		&& MD5(){ md5 -q "${1}";}
-command -v md5sum >/dev/null 2>&1 	&& MD5() { md5sum "${1}" | cut -f1 -d' ';}
-command -v bc >/dev/null 2>&1 || { echo >&2 "bc not installed. apt-get install bc."; exit 255; }
+command -v md5 >/dev/null 2>&1 		&& MD5(){ md5 -q "${1}" 2>/dev/null;}
+command -v md5sum >/dev/null 2>&1 	&& MD5() { md5sum "${1}" 2>/dev/null | cut -f1 -d' ';}
 command -v rsync >/dev/null 2>&1 || { echo >&2 "rsync not installed. apt-get install rsync."; exit 255; }
-command -v netstat >/dev/null 2>&1 || { echo >&2 "netstat not installed. apt-get install net-tools."; exit 255; }
+command -v netstat >/dev/null 2>&1 && { IS_HAVE_NETSTAT=1; }
 # Use traditional netcat that supports "netcat -nlp" for cross-platform comp.
 # on CentOS there is only nmap's netcat as 'nc' but we are expecting 'netcat()'.
 if [[ "$(nc --version 2>&1)" =~ Ncat ]]; then
@@ -68,11 +67,14 @@ if [[ -z "$NC_EOF_ARG" ]]; then
 	if [[ $($NC --help 2>&1) =~ "close connection on EOF" ]]; then
 		NC_EOF_ARG="-c"
 	elif [[ $($NC --help 2>&1) =~ "w timeout" ]]; then
-		NC_EOF_ARG="-w1"
+		NC_EOF_ARG="-w2" # cygwin needs at least -w2 (-w1 fails at times)
+	elif [[ -f /bin/busybox ]]; then
+		NC_EOF_ARG="-w5"
 	else
 		NC_EOF_ARG="-q1"
 	fi
 fi
+
 if [[ -z "$NC_LISTEN_ARG" ]]; then
 	if [[ $($NC --help 2>&1) =~ "source_port" ]]; then
 		# apple default : usage: nc [-46AacCDdEFhklMnOortUuvz] [-K tc] [-b boundif] [-i interval] [-p source_port]
@@ -96,23 +98,27 @@ export NC_LISTEN="${NC} ${NC_LISTEN_ARG}"
 export NC_LISTEN_EOF="${NC} ${NC_LISTEN_ARG} ${NC_EOF_ARG}"
 
 sleep 0.1 &>/dev/null || { echo >&2 "sleep not accepting 0.1. PATH set correct?"; exit 255; }
-OK="....[\033[1;32mOK\033[0m]"
+OK="......[\033[1;32mOK\033[0m]"
 FAIL="[\033[1;31mFAILED\033[0m]"
 SKIP="[\033[1;33mskipping\033[0m]"
 ECHO="echo -e"
 
-NETSTATTCP(){ netstat -ant;}
-[[ x"$OSTYPE" == "xsolaris"* ]] && NETSTATTCP(){ netstat -an -f inet; }
-[[ x"$OSTYPE" == *BSD* ]] && NETSTATTCP(){ netstat -an -f inet; }
+if [[ -n "$IS_HAVE_NETSTAT" ]]; then
+	NETSTATTCP(){ netstat -ant;}
+	[[ x"$OSTYPE" == "xsolaris"* ]] && NETSTATTCP(){ netstat -an -f inet; }
+	[[ x"$OSTYPE" == *BSD* ]] && NETSTATTCP(){ netstat -an -f inet; }
+else
+	echo >&2 "***** WARNING: netstat not found. Attempting anyway... *****"
+fi
 
 tests="1.1 "
 tests+="2.1 2.2 "
 tests+="3.1 "
 tests+="4.1 4.2 "
 tests+="5.1 5.2 5.3 5.4 "
-#tests+="5.5 "		# cleartext
+# tests+="5.5 "		# cleartext
 tests+="6.1 6.2 6.3 6.4 6.5 6.6 "	# gs-netcat
-#tests+="6.7 "		# cleartext
+# tests+="6.7 "		# cleartext
 tests+="6.8 "		# TOR
 tests+="7.1 7.2 7.3 7.4 "
 tests+="8.1 8.2 8.3 "
@@ -129,6 +135,7 @@ fi
 
 mk_dummy()
 {
+        # [ -f "$1" ] || dd bs=1024 count=$2 if=/dev/zero | tr '\000' '\101' >"$1" 2>/dev/null
         [ -f "$1" ] || dd bs=1024 count=$2 if=/dev/urandom of="$1" 2>/dev/null
 }
 mk_dummy test1k.dat 1
@@ -150,7 +157,9 @@ test_start()
 {
 	rm -f client_out.dat server_out.dat server_err.txt client_err.txt server[123]_out.dat client[12]_out.dat server[123]_err.txt client[12]_err.txt nc[123]_out.dat nc[123]_err.txt
 	[[ x"$1" != x ]] && $ECHO $*
-	[[ -s id_sec.txt ]] || new_id
+	# [[ -s id_sec.txt ]] || new_id
+	# Each test needs a new gsocket-secret or GSRN reports BAD-TOKEN.
+	new_id
 }
 
 fail()
@@ -164,10 +173,11 @@ skip()
 	$ECHO "${SKIP}" $*
 }
 
-# code file1 file2
+# code file1 file2 pid-to-kill
 md5fail()
 {
-	[[ "$(MD5 ${2})" != "$(MD5 ${3})" ]] && fail $1;
+	[[ -n $4 ]] && [[ "$(MD5 ${2})" != "$(MD5 ${3})" ]] && { kill -9 $4 &>/dev/null; fail $1; }
+	[[ "$(MD5 ${2})" != "$(MD5 ${3})" ]] && fail $1
 }
 
 # Wait until a process has termianted or kill it after SLEEP_WD seconds..
@@ -176,7 +186,6 @@ waitkp()
 	local x
 	local rounds
 	x=0
-	# rounds=`bc <<<"$SLEEP_WD / 0.1"`
 	rounds=$((SLEEP_WD * 10))
 	while :; do
 		kill -0 $1 &>/dev/null
@@ -242,7 +251,7 @@ waitkpf()
 waitf()
 {
 	x=0;
-	rounds=`bc <<<"$SLEEP_WD / 0.1"`
+	rounds=$(($SLEEP_WD * 10))
 	while :; do
 		if [ "$(MD5 $1)" == "$(MD5 $2)" ]; then
 			return
@@ -260,7 +269,7 @@ waitf()
 waitfhash()
 {
 	x=0;
-	rounds=`bc <<<"$SLEEP_WD / 0.1"`
+	rounds=$(($SLEEP_WD * 10))
 	while :; do
 		if [ "$(MD5 $1)" == "$2" ]; then
 			return
@@ -276,8 +285,11 @@ waitfhash()
 
 waittcp()
 {
+	# If we do not have netstat then sleep in the hope that port opens and then
+	# return.
+	[[ -z "$IS_HAVE_NETSTAT" ]] && { sleep 1; return; }
 	x=0;
-	rounds=`bc <<<"$SLEEP_WD / 0.1"`
+	rounds=$(($SLEEP_WD * 10))
 	while :; do
 		NETSTATTCP 2>/dev/null | grep LISTEN | grep "$1" &>/dev/null
 		if [ $? -eq 0 ]; then
@@ -435,10 +447,10 @@ if [[ "$tests" =~ '5.5' ]]; then
 test_start -n "Running: full-pipe #5.5 (assymetric sizes, clear)........."
 GSPID="$(sh -c '../tools/gs-full-pipe -k id_sec.txt -AC <test1M.dat 2>server_err.txt >server_out.dat & echo ${!}')"
 sleep_ct
-../tools/gs-full-pipe -k id_sec.txt -AC <test50k.dat 2>client_err.txt >client_out.dat
+../tools/gs-full-pipe -k id_sec.txt -AC <test4k.dat 2>client_err.txt >client_out.dat
 waitk $GSPID
 if [ "$MD1MB" != "$(MD5 client_out.dat)" ]; then fail 1; fi
-if [ "$(MD5 test50k.dat)" != "$(MD5 server_out.dat)" ]; then fail 2; fi
+if [ "$(MD5 test4k.dat)" != "$(MD5 server_out.dat)" ]; then fail 2; fi
 $ECHO "${OK}"
 fi
 
@@ -530,11 +542,12 @@ fi
 
 if [[ "$tests" =~ '6.8' ]]; then
 test_start -n "Running: netcat #6.8 (stdin, assymetric sizes, TOR)......."
-NETSTATTCP 2>/dev/null | grep LISTEN | grep 9050 &>/dev/null
-if [ $? -ne 0 ]; then
-	skip "(no TOR)"
-elif [[ "$GSOCKET_IP" =~ 192\.168\. ]]; then
+if [[ "$GSOCKET_IP" =~ 192\.168\. ]]; then
 	skip "$GSOCKET_IP"
+elif [[ -z "$IS_HAVE_NETSTAT" ]]; then
+	skip "(no netstat)"
+elif ! NETSTATTCP 2>/dev/null | grep LISTEN | grep 9050 &>/dev/null; then
+	skip "(no TOR)"
 else
 	GSPID="$(sh -c '../tools/gs-netcat -k id_sec.txt -wT <test4k.dat 2>client_err.txt >client_out.dat & echo ${!}')"
 	sleep_ct
@@ -721,6 +734,11 @@ test_start -n "Running: netcat #9.4 (curl/socks5, multi)................."
 curl --help all 2>/dev/null | grep socks5-hostname &>/dev/null
 if [ $? -ne 0 ]; then
 	skip "(no curl)"
+elif [[ "$(uname -a)" == *"GNU hurd"* ]]; then
+	# on GNU hurd curl & https to localhost sometimes thows a 'bad record mac' error.
+	# The cause is unknown. Works fine when gs-netcat runs on GNU hurd but curl
+	# from another host is used.
+	skip "(bad curl)"
 else
 	GSPID1="$(sh -c '../tools/gs-netcat -k id_sec.txt -lS 2>server_err.txt >server_out.dat & echo ${!}')"
 	GSPID3="$(sh -c '../tools/gs-netcat -k id_sec.txt -w -p 1085 2>client_err.txt >client_out.dat & echo ${!}')"
@@ -742,28 +760,31 @@ if [[ "${tests}" =~ '10.1' ]]; then
 test_start -n "Running: blitz #10.1 ....................................."
 rm -rf test_server test_client
 mkdir -p test_server test_client/foo/bar test_client/empty
-cp test4k.dat test_client/foo/bar/test4k.dat
-cp test1k.dat test_client/foo/bar/test1k.dat
-cp test1k.dat test_client/test1k.dat
-mkfifo test_client/fifo.io
-ln -s foo/bar/test4k.dat test_client/test4k.dat
-ln -s /etc/hosts test_client/etc-hosts
-ln -s /dev/zero test_client/zero
-GSPID1="$(sh -c 'blitz -k id_sec.txt -w -o "RSOPT=--bwlimit=100 -v" test_client/./ 2>client1_err.txt >client1_out.dat & echo ${!}')"
-cd test_server
-GSPID2="$(sh -c 'blitz -k ../id_sec.txt -l 2>../server1_err.txt >../server1_out.dat & echo ${!}')"
-cd ..
-waitk $GSPID1
-kill $GSPID2
-(cd test_client; find . -type f | while read x; do md5fail 1 ../test_server/${x} ${x}; done)
-md5fail 2 test_server/test4k.dat test4k.dat
-[[ -e test_server/fifo.io ]] && fail 3
-[[ -e test_server/zero ]] && fail 4
-[[ -e test_server/etc-hosts ]] && fail 5
-[[ -L test_server/test4k.dat ]] || fail 6
-[[ -d test_server/empty ]] || fail 7
-rm -rf test_server test_client
-$ECHO "${OK}"
+if ! mkfifo test_client/fifo.io &>/dev/null; then
+	skip "(mkfifo)" # likely on a VMBOX shared drive
+else
+	cp test4k.dat test_client/foo/bar/test4k.dat
+	cp test1k.dat test_client/foo/bar/test1k.dat
+	cp test1k.dat test_client/test1k.dat
+	ln -s foo/bar/test4k.dat test_client/test4k.dat
+	ln -s /etc/hosts test_client/etc-hosts
+	ln -s /dev/zero test_client/zero
+	GSPID1="$(sh -c 'blitz -k id_sec.txt -w -o "RSOPT=--bwlimit=100 -v" test_client/./ 2>client1_err.txt >client1_out.dat & echo ${!}')"
+	cd test_server
+	GSPID2="$(sh -c 'blitz -k ../id_sec.txt -l 2>../server1_err.txt >../server1_out.dat & echo ${!}')"
+	cd ..
+	waitk $GSPID1
+	kill $GSPID2
+	(cd test_client; find . -type f | while read x; do md5fail 1 ../test_server/${x} ${x}; done)
+	md5fail 2 test_server/test4k.dat test4k.dat
+	[[ -e test_server/fifo.io ]] && fail 3
+	[[ -e test_server/zero ]] && fail 4
+	[[ -e test_server/etc-hosts ]] && fail 5
+	[[ -L test_server/test4k.dat ]] || fail 6
+	[[ -d test_server/empty ]] || fail 7
+	rm -rf test_server test_client
+	$ECHO "${OK}"
+	fi
 fi
 
 if [[ "${tests}" =~ '10.2' ]]; then
@@ -801,8 +822,10 @@ test_start -n "Running: gs-mount #10.4 .................................."
 command -v sshfs  >/dev/null 2>&1
 if [ $? -ne 0 ]; then
 	skip "(no sshfs)"
-elif [[ "$OSTYPE" =~ darwin ]]; then
-	skip "fuse-broken"
+elif [[ "$OSTYPE" == *"darwin"* ]]; then
+	# osxfuse and macosfuse are both broken now
+	# macosfuse hangs the host. force-unmount not working. Not recoverable. reboot needed.
+	skip "OSX fuse-broken"
 else	
 	rm -rf test_client &>/dev/null
 	rmdir test_mnt &>/dev/null
@@ -811,19 +834,23 @@ else
 	GSPID1="$(sh -c 'gs-mount -k id_sec.txt -w test_mnt 2>client1_err.txt >client1_out.dat & echo ${!}')"
 	GSPID2="$(sh -c 'cd test_client; gs-mount -k ../id_sec.txt -l 2>../server1_err.txt >../server1_out.dat & echo ${!}')"
 	waitk $GSPID1
-	md5fail 1 test_mnt/test1k.dat test_client/test1k.dat
-	md5fail 2 test_mnt/test4k.dat test_client/test4k.dat
-	if command -v fusermount >/dev/null 2>&1; then
-		fusermount -zu test_mnt
+	if grep forbidden client1_err.txt &>/dev/null; then
+		skip "(forbidden)" # VMBox drive?
 	else
-		# archLinux -f flag needs superuser (bug in umount)
-		umount test_mnt &>/dev/null
-		umount -f test_mnt &>/dev/null
+		md5fail 1 test_mnt/test1k.dat test_client/test1k.dat $GSPID2
+		md5fail 2 test_mnt/test4k.dat test_client/test4k.dat $GSPID2
+		if command -v fusermount >/dev/null 2>&1; then
+			fusermount -zu test_mnt
+		else
+			# archLinux -f flag needs superuser (bug in umount)
+			umount test_mnt &>/dev/null
+			umount -f test_mnt &>/dev/null
+		fi
+		$ECHO "${OK}"
 	fi
 	kill $GSPID2
 	rm -rf test_client
 	rmdir test_mnt
-	$ECHO "${OK}"
 	fi
 fi
 
@@ -864,7 +891,7 @@ fi
 
 if [[ "${tests}" =~ '10.7' ]]; then
 test_start -n "Running: gsocket ssh #10.7 (stdin)........................"
-if [[ "$OSTYPE" =~ solaris ]]; then
+if [[ "$OSTYPE" == *"solaris"* ]]; then
 	# Solaris SSHD does not work unless it's run as root (some PAM shit)
 	# Also needs -4 flag to run as IPv4 only (still, PAM shit afterwards)
 	skip "(needs root)"

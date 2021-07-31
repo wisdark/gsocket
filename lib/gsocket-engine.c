@@ -15,7 +15,6 @@
 #include <openssl/sha.h>
 #include <gsocket/gsocket.h>
 #include "gsocket-engine.h"
-#include "gsocket-sha256.h"	// Use internal SHA256 if no OpenSSL available
 #include "gs-externs.h"
 
 #ifdef DEBUG
@@ -30,25 +29,28 @@ fd_set *gs_debug_rfd;
 fd_set *gs_debug_wfd;
 fd_set *gs_debug_r;
 fd_set *gs_debug_w;
-#endif
+#endif // DEBUG
 FILE *gs_errfp;
+gs_cb_log_t gs_func_log;
+static struct _gs_log_info gs_log_info;
+
 
 #define GS_NET_DEFAULT_HOST			"gs.thc.org"
-#define GS_NET_DEFAULT_PORT			7350
 #define GS_SOCKS_DFL_IP				"127.0.0.1"
 #define GS_SOCKS_DFL_PORT			9050
 #define GS_GS_HTON_DELAY			(12 * 60 * 60)	// every 12h 
 #ifdef DEBUG_SELECT
-# define GS_DEFAULT_PING_INTERVAL	(30)
+//# define GS_DEFAULT_PING_INTERVAL	(30)
 # define GS_RECONNECT_DELAY			(3)
 #else
-# define GS_DEFAULT_PING_INTERVAL	(2*60)	// Every 2 minutes
+//# define GS_DEFAULT_PING_INTERVAL	(2*60)	// Every 2 minutes
 # define GS_RECONNECT_DELAY			(15)	// connect() not more than every 15s
+# define GS_WARN_SLOWCONNECT        (4)     // Warn about slow connect() after 4 seconds...
 #endif
 
 // #define STRESSTEST	1
 #ifdef STRESSTEST
-# define GS_DEFAULT_PING_INTERVAL	(1)
+//# define GS_DEFAULT_PING_INTERVAL	(1)
 #endif
 
 static const char unit[] = "BKMGT";    /* Up to Exa-bytes. */
@@ -61,7 +63,6 @@ static void gs_listen_add_gs_select_by_sox(GS_SELECT_CTX *ctx, gselect_cb_t func
 static void gs_net_try_reconnect_by_sox(GS *gs, struct gs_sox *sox);
 static void gs_net_init_by_sox(GS_CTX *ctx, struct gs_sox *sox);
 static int gs_net_connect_new_socket(GS *gs, struct gs_sox *sox);
-
 
 #ifndef int_ntoa
 const char *
@@ -166,7 +167,7 @@ gs_fds_out_rwfd(GS_SELECT_CTX *ctx)
 }
 
 void
-GS_library_init(FILE *err_fp, FILE *dout_fp)
+GS_library_init(FILE *err_fp, FILE *dout_fp, gs_cb_log_t func_log)
 {
 	if (gs_lib_init_called != 0)
 		return;
@@ -179,7 +180,14 @@ GS_library_init(FILE *err_fp, FILE *dout_fp)
 
 	XASSERT(RAND_status() == 1, "RAND_status()");
 
+	if (func_log != NULL)
+	{
+		gs_log_info.msg = calloc(1, GS_LOG_INFO_MSG_SIZE);
+		XASSERT(gs_log_info.msg != NULL, "calloc: %s\n", strerror(errno));
+	}
+
 	gs_errfp = err_fp;
+	gs_func_log = func_log;
 #ifdef DEBUG
 	gs_dout = dout_fp;
 #endif
@@ -188,7 +196,7 @@ GS_library_init(FILE *err_fp, FILE *dout_fp)
 int
 GS_CTX_init(GS_CTX *ctx, fd_set *rfd, fd_set *wfd, fd_set *r, fd_set *w, struct timeval *tv_now)
 {
-	GS_library_init(stderr, stderr);
+	GS_library_init(stderr, stderr, NULL);
 
 	memset(ctx, 0, sizeof *ctx);
 
@@ -224,6 +232,7 @@ GS_CTX_init(GS_CTX *ctx, fd_set *rfd, fd_set *wfd, fd_set *r, fd_set *w, struct 
 
 	ctx->gs_flags |= GSC_FL_USE_SRP;		// Encryption by default
 	ctx->gs_flags |= GSC_FL_NONBLOCKING;	// Non-blocking by default
+	ctx->flags_proto |= GS_FL_PROTO_FAST_CONNECT;
 
 	return 0;
 }
@@ -291,12 +300,34 @@ gs_set_ip_by_hostname(GS *gs, const char *hostname)
 	uint32_t gs_ip;
 	gs_ip = GS_hton(hostname);
 	if (gs_ip == 0xFFFFFFFF)
+	{
+		GS_LOG_ERR("Cannot resolve '%s'. Re-trying in %d seconds...\n", hostname, GS_RECONNECT_DELAY);
 		return GS_ERROR;
+	}
+	DEBUGF_B("Setting hostname=%s\n", hostname);
 
 	gs->net.tv_gs_hton = GS_TV_TO_USEC(gs->ctx->tv_now);
 	gs->net.addr = gs_ip;
 
 	return GS_SUCCESS;
+}
+
+// Call callback to pass log message from library to calling programm
+void
+GS_log(int type, int level, char *fmt, ...)
+{
+	if (gs_func_log == NULL)
+		return;
+
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(gs_log_info.msg, GS_LOG_INFO_MSG_SIZE, fmt, ap);
+	va_end(ap);
+
+	gs_log_info.level = level;
+	gs_log_info.type = type;
+
+	(*gs_func_log)(&gs_log_info);
 }
 
 GS *
@@ -317,7 +348,7 @@ GS_new(GS_CTX *ctx, GS_ADDR *addr)
 	if (ptr != NULL)
 		gs_port = htons(atoi(ptr));
 	else
-		gs_port = htons(GS_NET_DEFAULT_PORT);
+		gs_port = htons(GSRN_DEFAULT_PORT);
 
 	ctx->gs_port = gs_port;	// Socks5 needs to know
 	gsocket->net.port = gs_port;
@@ -335,31 +366,25 @@ GS_new(GS_CTX *ctx, GS_ADDR *addr)
 		hostname = getenv("GSOCKET_HOST");
 		if (hostname == NULL)
 		{
-			/* Connect to [a-z].gsocket.org depending on GS-address */
-			int num = 0;
-			int i;
-			for (i = 0; i < sizeof addr->addr; i++)
-				num += addr->addr[i];
-			num = num % 26;
-			snprintf(buf, sizeof buf, "%c.%s", 'a' + num, GS_NET_DEFAULT_HOST);
+			uint8_t hostname_id;
+			hostname_id = GS_ADDR_get_hostname_id(addr->addr);
+			// Connect to [a-z].gsocket.io depending on GS-address
+			const char *domain;
+			domain = getenv("GSOCKET_DOMAIN");
+			if (domain == NULL)
+				domain = GS_NET_DEFAULT_HOST;
+
+			snprintf(buf, sizeof buf, "%c.%s", 'a' + hostname_id, domain);
 			hostname = buf;
 		}
-
 		gsocket->net.hostname = strdup(hostname);
 
-		int ret;
-		ret = gs_set_ip_by_hostname(gsocket, gsocket->net.hostname);
-		if (ret != GS_SUCCESS)
-		{
-			free(gsocket);
-			gs_set_error(ctx, "Failed to resolve '%s'", hostname);
-			return NULL;
-		}
+		gs_set_ip_by_hostname(gsocket, gsocket->net.hostname);
 	}
 
 	if (ctx->socks_ip != 0)
 	{
-		/* HERE: Socks5 is used */
+		// HERE: Socks5 is used
 		gsocket->net.addr = ctx->socks_ip;
 		gsocket->net.port = ctx->socks_port;
 		XASSERT(gsocket->net.hostname != NULL, "Socks5 but hostname not set\n");
@@ -376,7 +401,7 @@ GS_new(GS_CTX *ctx, GS_ADDR *addr)
 
 	memcpy(&gsocket->gs_addr, addr, sizeof gsocket->gs_addr);
 
-	GS_srp_setpassword(gsocket, gsocket->gs_addr.b58str);
+	GS_srp_setpassword(gsocket, gsocket->gs_addr.srp_password);
 
 	GS_set_token(gsocket, NULL, 0);
 
@@ -386,6 +411,17 @@ GS_new(GS_CTX *ctx, GS_ADDR *addr)
 static void
 gs_net_connect_complete(GS *gs, struct gs_sox *sox)
 {
+	int vlevel = GS_LOG_LEVEL_VERBOSE;
+
+	// If we warned about a slow connection then also say when we succeeded...
+	if (sox->flags & GS_SOX_FL_WARN_SLOWCONNECT)
+		vlevel = GS_LOG_LEVEL_NONE;
+
+	if (gs->ctx->socks_ip != 0)
+		GS_log(GS_LOG_TYPE_NORMAL, vlevel, "GSRN connection established [via TOR to %s:%d].\n", gs->net.hostname, ntohs(gs->ctx->gs_port));
+	else
+		GS_log(GS_LOG_TYPE_NORMAL, vlevel, "GSRN connection established [%s:%d].\n", int_ntoa(gs->net.addr), ntohs(gs->ctx->gs_port));
+
 	if (gs->flags & GS_FL_IS_CLIENT)
 		gs_pkt_connect_write(gs, sox);
 	else
@@ -393,6 +429,8 @@ gs_net_connect_complete(GS *gs, struct gs_sox *sox)
 
 	if (gs->net.conn_count >= gs->net.n_sox)
 		gs->flags |= GS_FL_TCP_CONNECTED;	// All TCP (APP) are now connected
+
+	sox->flags &= ~GS_SOX_FL_WARN_SLOWCONNECT;
 }
 
 /*
@@ -413,8 +451,7 @@ gs_net_connect_by_sox(GS *gsocket, struct gs_sox *sox)
 	addr.sin_port = gsocket->net.port;
 	errno = 0;
 	ret = connect(sox->fd, (struct sockaddr *)&addr, sizeof addr);
-	DEBUGF("connect(%s:%d, fd = %d): %d (errno = %d, %s)\n", int_ntoa(gsocket->net.addr), ntohs(addr.sin_port), sox->fd, ret, errno, strerror(errno));
-	gsocket->net.tv_connect = GS_TV_TO_USEC(gsocket->ctx->tv_now);
+	// DEBUGF("connect(%s:%d, fd = %d): %d (errno = %d, %s)\n", int_ntoa(gsocket->net.addr), ntohs(addr.sin_port), sox->fd, ret, errno, strerror(errno));
 	if (ret != 0)
 	{
 		if ((errno == EINPROGRESS) || (errno == EAGAIN) || (errno == EINTR))
@@ -428,9 +465,13 @@ gs_net_connect_by_sox(GS *gsocket, struct gs_sox *sox)
 		{
 			/* HERE: NOT connected */
 			if (gsocket->ctx->socks_ip == 0)
+			{
+				// GS_LOG_ERR("connect(%s:%d): %s.\n", int_ntoa(gsocket->net.addr), ntohs(gsocket->net.port), strerror(errno));
 				gs_set_error(gsocket->ctx, "connect(%s:%d)", int_ntoa(gsocket->net.addr), ntohs(gsocket->net.port));
-			else
+			} else {
+				// GS_LOG_ERR("connect(%s:%d): %s. Tor not running?\n", int_ntoa(gsocket->net.addr), ntohs(gsocket->net.port), strerror(errno));
 				gs_set_error(gsocket->ctx, "connect(%s:%d). Tor not running?", int_ntoa(gsocket->net.addr), ntohs(gsocket->net.port));
+			}
 			return GS_ERR_FATAL;
 		}
 	}
@@ -445,6 +486,7 @@ gs_net_connect_by_sox(GS *gsocket, struct gs_sox *sox)
 
 	if (gsocket->ctx->socks_ip != 0)
 	{
+		GS_LOG_VV("Connection to TOR established [%s:%d].\n", int_ntoa(gsocket->ctx->socks_ip), ntohs(gsocket->ctx->socks_port));
 		gs_pkt_connect_socks(gsocket, sox);
 	} else {
 		gs_net_connect_complete(gsocket, sox);
@@ -564,6 +606,7 @@ gs_pkt_listen_write(GS *gsocket, struct gs_sox *sox)
 
 	memcpy(glisten.token, gsocket->token, sizeof glisten.token);
 	memcpy(glisten.addr, gsocket->gs_addr.addr, MIN(sizeof glisten.addr, GS_ADDR_SIZE));
+	HEXDUMP(glisten.addr, sizeof glisten.addr);
 
 	ret = sox_write(sox, &glisten, sizeof glisten);
 	if (ret == 0)
@@ -646,6 +689,7 @@ gs_pkt_dispatch(GS *gsocket, struct gs_sox *sox)
 		return GS_SUCCESS;
 	}
 
+	char msg[128];
 	if (sox->rbuf[0] == GS_PKT_TYPE_STATUS)
 	{
 		struct _gs_status *status = (struct _gs_status *)sox->rbuf;
@@ -665,7 +709,10 @@ gs_pkt_dispatch(GS *gsocket, struct gs_sox *sox)
 					err_str = "Idle-Timeout. Server did not receive any data";
 					break;
 				default:
-					err_str = "Unknown";
+					err_str = "UNKNOWN";
+					GS_sanitize_logmsg(msg, sizeof msg, (char *)status->msg, sizeof status->msg);
+					if (msg[0] != '\0')
+						err_str = msg;
 					break;
 			}
 			gsocket->status_code = status->code;
@@ -923,20 +970,32 @@ GS_heartbeat(GS *gsocket)
 
 		XASSERT(sox->state != GS_STATE_APP_CONNECTED, "fd = %d but APP already CONNECTED state\n", gsocket->fd);
 
-		/* if connect() fails then fd is -1 */
-		/* Skip if 'want-write' is already set. We are already trying to write data. */
+		// Skip if busy with connect() systemcall.
+		if (sox->state == GS_STATE_SYS_CONNECT)
+		{
+			if (GS_TV_TO_USEC(gsocket->ctx->tv_now) < gsocket->net.tv_connect + GS_SEC_TO_USEC(GS_WARN_SLOWCONNECT))
+				continue;
+
+			if (sox->flags & GS_SOX_FL_WARN_SLOWCONNECT)
+				continue;
+
+			// Warning if connection takes longer than expected...
+			sox->flags |= GS_SOX_FL_WARN_SLOWCONNECT;
+			GS_LOG("Connecting to GSRN [%s:%d] takes longer than expected. Still trying...\n", int_ntoa(gsocket->net.addr), ntohs(gsocket->net.port));
+
+			continue;
+		}
+
+		// Skip if 'want-write' is already set. We are already trying to write data.
+		// fd is -1 if connect() failed
 		if ((sox->fd >= 0) && (FD_ISSET(sox->fd, gsocket->ctx->wfd)))
 			continue;
 
-		/* Skip if oustanding PONG..*/
+		/* Skip if outstanding PONG..*/
 		if (sox->flags & GS_SOX_FL_AWAITING_PONG)
 			continue;
 
 		XASSERT(sox->state != GS_STATE_PKT_ACCEPT, "APP_CONNECTED == false _and_ state == ACCEPT\n");
-
-		/* Skip if we are busy with any other system-call (e.g. needing to call 'connect()' again */
-		if (sox->state == GS_STATE_SYS_CONNECT)
-			continue;
 
 		if (sox->state == GS_STATE_SYS_RECONNECT)
 		{
@@ -948,7 +1007,7 @@ GS_heartbeat(GS *gsocket)
 		{
 			uint64_t tv_diff = GS_TV_DIFF(&sox->tv_last_data, gsocket->ctx->tv_now);
 			// DEBUGF("diff = %llu\n", tv_diff);
-			if (tv_diff > GS_SEC_TO_USEC(GS_DEFAULT_PING_INTERVAL))
+			if (tv_diff > GS_SEC_TO_USEC(GSRN_DEFAULT_PING_INTERVAL))
 			{
 				gs_pkt_ping_write(gsocket, sox);
 				memcpy(&sox->tv_last_data, gsocket->ctx->tv_now, sizeof sox->tv_last_data);
@@ -982,7 +1041,7 @@ gs_net_try_reconnect_by_sox(GS *gs, struct gs_sox *sox)
 
 	if (GS_TV_TO_USEC(gs->ctx->tv_now) <= gs->net.tv_connect + GS_SEC_TO_USEC(GS_RECONNECT_DELAY))
 	{
-		DEBUGF_M("To many connect() attempts... Heartbeat will wake us later...\n");
+		DEBUGF_M("To many connect() attempts. Heartbeat will wake us later...\n");
 		return;
 	}
 	/* Ignore return value. If this fails then ignorning return value means
@@ -1045,11 +1104,7 @@ gs_process(GS *gsocket)
 
 				/* HERE: Auto-Reconnect. Failed in connect() or write(). */
 				DEBUGF_M("GS-NET error. Re-connecting...\n");
-				if (!gsocket->net.is_connect_error_warned)
-				{
-					gsocket->net.is_connect_error_warned = 1;
-					xfprintf(gs_errfp, "%s GS-NET: %s. Re-connecting...\n", GS_logtime(), strerror(errno));
-				}
+				GS_LOG_ERR("%s GSRN %s. Re-connecting to %s:%d...\n", GS_logtime(), strerror(errno), int_ntoa(gsocket->net.addr), ntohs(gsocket->net.port));
 				close(sox->fd);
 				gs_net_init_by_sox(gsocket->ctx, sox);
 				gs_net_try_reconnect_by_sox(gsocket, sox);
@@ -1062,8 +1117,6 @@ gs_process(GS *gsocket)
 			}
 
 			// HERE: connect() succeeded 
-			gsocket->net.is_connect_error_warned = 0;
-
 			memcpy(&sox->tv_last_data, gsocket->ctx->tv_now, sizeof sox->tv_last_data);
 			/* Immediatly let app know that a new gs-connection has been accepted */
 			if (gsocket->net.fd_accepted >= 0)
@@ -1144,9 +1197,6 @@ gs_net_connect_new_socket(GS *gs, struct gs_sox *sox)
 {
 	int ret;
 
-	if (sox->fd >= 0)
-		return GS_SUCCESS;	// Skip existing (valid) TCP sockets
-
 	/*
 	 * If we use the GS_select() subsystem:
 	 * After GS_accept() a new TCP connection is established to
@@ -1159,20 +1209,40 @@ gs_net_connect_new_socket(GS *gs, struct gs_sox *sox)
 	int cb_val;
 	func = gs->ctx->func_listen;
 	cb_val = gs->ctx->cb_val_listen;
-	DEBUGF("gs_net_connect called (GS_select() cb_func = %p\n", func);
 	GS_SELECT_CTX *gselect_ctx = gs->ctx->gselect_ctx;
 	/* GS_select_HACK-1-END */
 
-	/* HERE: socket() does not exist yet. Create it. */
-	ret = gs_net_new_socket(gs, sox);
-	if (ret != GS_SUCCESS)
-		return GS_ERROR;
+	DEBUGF("gs_net_connect called (GS_select() cb_func = %p\n", func);
 
-	/* Connect TCP */
-	ret = gs_net_connect_by_sox(gs, sox);
-	DEBUGF("gs_net_connect_by_sox(fd = %d): %d, %s\n", sox->fd, ret, strerror(errno));
-	if (ret == GS_ERR_FATAL)
-		ERREXIT("%s\n", GS_CTX_strerror(gs->ctx));
+	if (sox->fd < 0)
+	{
+		// HERE: socket() does not exist yet. Create it.
+		ret = gs_net_new_socket(gs, sox);
+		if (ret != GS_SUCCESS)
+			return GS_ERROR;
+	}
+
+	gs->net.tv_connect = GS_TV_TO_USEC(gs->ctx->tv_now);
+
+	// The calling process expects a socket to be created here regardless
+	// if IP is known. Thus we create a socket but only call 'connect()' once
+	// IP is known (e.g. domain name resolves).
+	if (gs->net.addr == 0)
+	{
+		// IP address failed to resolve.
+		// Go into reconnect state. Heartbeat complete the connect()...
+		if (sox->state == GS_STATE_SYS_RECONNECT)
+			return GS_SUCCESS; // return immediately if this is already a reconnect
+		sox->state = GS_STATE_SYS_RECONNECT;
+	} else {
+		GS_LOG_VV("Connecting to %s:%d...\n", int_ntoa(gs->net.addr), ntohs(gs->net.port));
+
+		/* Connect TCP */
+		ret = gs_net_connect_by_sox(gs, sox);
+		DEBUGF("gs_net_connect_by_sox(fd = %d): %d, %s\n", sox->fd, ret, strerror(errno));
+		if (ret == GS_ERR_FATAL)
+			ERREXIT("%s\n", GS_CTX_strerror(gs->ctx));
+	}
 
 	/* GS_select-HACK-1-START */
 	if (gs->ctx->gselect_ctx != NULL)
@@ -1227,8 +1297,6 @@ gs_net_init_by_sox(GS_CTX *ctx, struct gs_sox *sox)
 {
 	XFD_CLR(sox->fd, ctx->wfd);
 	XFD_CLR(sox->fd, ctx->rfd);
-	// FD_CLR(sox->fd, ctx->w);
-	// FD_CLR(sox->fd, ctx->r);
 	memset(sox, 0, sizeof *sox);
 	sox->fd = -1;
 }
@@ -1792,9 +1860,16 @@ GS_CTX_setsockopt(GS_CTX *ctx, int level, const void *opt_value, size_t opt_len)
 
 	/* PROTOCOL FLAGS -> copied into pkt's flags 1:1 */
 	if (level == GS_OPT_SOCKWAIT)
+	{
 		ctx->flags_proto |= GS_FL_PROTO_WAIT;
-	else if (level == GS_OPT_CLIENT_OR_SERVER)
+		ctx->flags_proto &= ~GS_FL_PROTO_FAST_CONNECT; // Disable fast-connect
+	} else if (level == GS_OPT_CLIENT_OR_SERVER) {
 		ctx->flags_proto |= GS_FL_PROTO_CLIENT_OR_SERVER;
+		ctx->flags_proto &= ~GS_FL_PROTO_FAST_CONNECT; // Disable fast-connect
+	}
+	else if (level == GS_OPT_LOW_LATENCY)
+		ctx->flags_proto |= GS_FL_PROTO_LOW_LATENCY;
+
 	/* FLAGS */
 	else if (level == GS_OPT_BLOCK)
 		ctx->gs_flags &= ~GSC_FL_NONBLOCKING;
@@ -1951,7 +2026,6 @@ GS_read(GS *gsocket, void *buf, size_t count)
 	return ret;
 }
 
-
 void
 GS_SELECT_FD_SET_W(GS *gs)
 {
@@ -2039,12 +2113,14 @@ GS_write(GS *gsocket, const void *buf, size_t count)
 		}
 #endif
 	} else {
+		if (count == 0)
+			return -2; // Nothing to be done.
 		len = write(gsocket->fd, buf, count);
 		// DEBUGF("write(%zu) = %zd (%s)\n", count, len, errno==0?"ok":strerror(errno));
 
 		if (len <= 0)
 		{
-			if ((errno != EAGAIN) & (errno != EINTR))
+			if ((errno != EAGAIN) && (errno != EINTR))
 				return -1;
 			err = SSL_ERROR_WANT_WRITE;
 		}
@@ -2080,17 +2156,7 @@ GS_write(GS *gsocket, const void *buf, size_t count)
  * GS UTILS                                                                   *
  ******************************************************************************/
 
-static const char       b58digits_ordered[] = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-static const int8_t b58digits_map[] = {
-	-1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1,
-	-1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1,
-	-1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1,
-	-1, 0, 1, 2, 3, 4, 5, 6,  7, 8,-1,-1,-1,-1,-1,-1,
-	-1, 9,10,11,12,13,14,15, 16,-1,17,18,19,20,21,-1,
-	22,23,24,25,26,27,28,29, 30,31,32,-1,-1,-1,-1,-1,
-	-1,33,34,35,36,37,38,39, 40,41,42,43,-1,44,45,46,
-	47,48,49,50,51,52,53,54, 55,56,57,-1,-1,-1,-1,-1,
-};
+
 
 
 /*
@@ -2201,213 +2267,13 @@ GS_logtime(void)
 	return tbuf;
 }
 
-bool
-b58tobin(void *bin, size_t *binszp, const char *b58, size_t b58sz)
-{
-
-	size_t binsz = *binszp;
-	const unsigned char *b58u = (void*)b58;
-	unsigned char *binu = bin;
-	size_t outisz = (binsz + 3) / 4;
-	uint32_t outi[outisz];
-	uint64_t t;
-	uint32_t c;
-	size_t i, j;
-	uint8_t bytesleft = binsz % 4;
-	uint32_t zeromask = bytesleft ? (0xffffffff << (bytesleft * 8)) : 0;
-	unsigned zerocount = 0;
-	
-	if (!b58sz)
-		b58sz = strlen(b58);
-	
-	memset(outi, 0, outisz * sizeof(*outi));
-	
-	// Leading zeros, just count
-	for (i = 0; i < b58sz && b58u[i] == '1'; ++i)
-		++zerocount;
-	
-	for ( ; i < b58sz; ++i)
-	{
-		if (b58u[i] & 0x80)
-			// High-bit set on invalid digit
-			return false;
-		if (b58digits_map[b58u[i]] == -1)
-			// Invalid base58 digit
-			return false;
-		c = (unsigned)b58digits_map[b58u[i]];
-		for (j = outisz; j--; )
-		{
-			t = ((uint64_t)outi[j]) * 58 + c;
-			c = (t & 0x3f00000000) >> 32;
-			outi[j] = t & 0xffffffff;
-		}
-		if (c)
-			// Output number too big (carry to the next int32)
-			return false;
-		if (outi[0] & zeromask)
-			// Output number too big (last int32 filled too far)
-			return false;
-	}
-	
-	j = 0;
-	switch (bytesleft) {
-		case 3:
-			*(binu++) = (outi[0] &   0xff0000) >> 16;
-		case 2:
-			*(binu++) = (outi[0] &     0xff00) >>  8;
-		case 1:
-			*(binu++) = (outi[0] &       0xff);
-			++j;
-		default:
-			break;
-	}
-	
-	for (; j < outisz; ++j)
-	{
-		*(binu++) = (outi[j] >> 0x18) & 0xff;
-		*(binu++) = (outi[j] >> 0x10) & 0xff;
-		*(binu++) = (outi[j] >>    8) & 0xff;
-		*(binu++) = (outi[j] >>    0) & 0xff;
-	}
-	
-	// Count canonical base58 byte count
-	binu = bin;
-	for (i = 0; i < binsz; ++i)
-	{
-		if (binu[i])
-			break;
-		--*binszp;
-	}
-	*binszp += zerocount;
-	
-	return true;	
-}
-
-#if 0
-/* Convert Base58 address to binary. Check CRC.
- */
-static int
-b58dec(void *dst, char *str)
-{
-	return 0;
-}
-#endif
-
-/* Convert 128 bit binary into base58 + CRC
- */
-static int
-b58enc(char *b58, size_t *b58sz, uint8_t *src, size_t binsz)
-{
-    const uint8_t *bin = src;
-    int carry;
-    size_t i, j, high, zcount = 0;
-    size_t size;
-
-    /* Find out the length. Count leading 0's. */
-    while (zcount < binsz && !bin[zcount])
-            ++zcount;
-
-    size = (binsz - zcount) * 138 / 100 + 1;
-    uint8_t buf[size];
-    memset(buf, 0, size);
-
-    for (i = zcount, high = size - 1; i < binsz; ++i, high = j)
-    {
-            for (carry = bin[i], j = size - 1; (j > high) || carry; --j)
-            {
-                    carry += 256 * buf[j];
-                    buf[j] = carry % 58;
-                    carry /= 58;
-                    if (!j)
-                    {
-                            break;
-                    }
-            }
-    }
-
-    for (j = 0; j < size && !buf[j]; ++j);
-
-    if (*b58sz <= zcount + size - j)
-    {
-            ERREXIT("Wrong size...%zu\n", zcount + size - j + 1);
-            *b58sz = zcount + size - j + 1;
-            return -1;
-    }
-    if (zcount)
-    	memset(b58, '1', zcount);
-
-    for (i = zcount; j < size; ++i, ++j)
-    {
-            b58[i] = b58digits_ordered[buf[j]];
-    }
-    b58[i] = '\0';
-    *b58sz = i + 1;
-
-	return 0;
-}
-
-
-/*
- * Convert a binary to a GS address.
- */
-GS_ADDR *
-GS_ADDR_bin2addr(GS_ADDR *addr, const void *data, size_t len)
-{
-	unsigned char md[SHA256_DIGEST_LENGTH];
-	char b58[GS_ADDR_B58_LEN + 1];
-	size_t b58sz = sizeof b58;
-
-	memset(addr, 0, sizeof *addr);
-	GS_SHA256(data, len, md);
-	memcpy(addr->addr, md, sizeof addr->addr);
-
-	HEXDUMP(addr->addr, sizeof addr->addr);
-
-	b58enc(b58, &b58sz, md, GS_ADDR_SIZE);
-	DEBUGF("b58 (%lu): %s\n", b58sz, b58);
-	addr->b58sz = b58sz;
-	snprintf(addr->b58str, sizeof addr->b58str, "%s", b58);
-
-	return addr;
-}
-
-/*
- * Convert a human readable string (password) to GS address. 
- */
-GS_ADDR *
-GS_ADDR_str2addr(GS_ADDR *addr, const char *str)
-{
-	addr = GS_ADDR_bin2addr(addr, str, strlen(str));
-
-	return addr;
-}
-
-/*
- * Derive a GS-Address from IPv4 + Port tuple.
- * Use at your own risk. GS-Address can easily be guessed.
- */
-GS_ADDR *
-GS_ADDR_ipport2addr(GS_ADDR *addr, uint32_t ip, uint16_t port)
-{
-	struct in_addr in;
-	char buf[128];
-
-	in.s_addr = ip;
-
-	snprintf(buf, sizeof buf, "%s:%d", inet_ntoa(in), ntohs(port));
-	//DEBUGF("%s\n", buf);
-	GS_ADDR_str2addr(addr, buf);
-	
-	return addr;
-}
-
 /*
  * Set the 'listen' token. This will stop a client (who knows the secret) to
  * impersonate a server (while the server is connected).
  *
  * A User might decide to use the same 'token' as a kind of master password
  * for all its servers. We like not to be able to track the User. Thus the
- * token is a has over TOKEN-STRING + GS-ADDRESS. This makes every token unique
+ * token is a hash over TOKEN-STRING + GS-ADDRESS. This makes every token unique
  * per GS-ADDRESS.
  *
  * FIXME: extend this later to use as an auth-token:
@@ -2428,7 +2294,7 @@ GS_set_token(GS *gs, const void *data, size_t len)
 		input = malloc(len + sizeof gs->gs_addr.addr);
 		memcpy(input, data, len);
 		memcpy(input + len, gs->gs_addr.addr, sizeof gs->gs_addr.addr);
-		GS_SHA256(input, len + sizeof gs->gs_addr.addr, md);
+		SHA256(input, len + sizeof gs->gs_addr.addr, md);
 		memcpy(gs->token, md, sizeof gs->token);
 		free(input);
 	}

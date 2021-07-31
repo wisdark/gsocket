@@ -60,7 +60,8 @@ static void vlog_hostname(struct _peer *p, const char *desc, uint16_t port);
 #define GS_PEER_IDLE_TIMEOUT    GS_SEC_TO_USEC(60 + 5)
 #endif
 // Shut any connection after 2 seconds if an EOF was received (shutdown())
-#define GS_PEER_IDLE_TIMEOUT_EOF GS_SEC_TO_USEC(2)
+#define GS_PEER_IDLE_TIMEOUT_EOF_UDP GS_SEC_TO_USEC(2)
+#define GS_PEER_IDLE_TIMEOUT_EOF_TCP GS_SEC_TO_USEC(2)
 
 /*
  * Make statistics and return them in 'dst'
@@ -156,7 +157,7 @@ peer_free(GS_SELECT_CTX *ctx, struct _peer *p)
 	{
 		char buf[512];
 		peer_mk_stats(buf, sizeof buf, p);
-		VLOG_TSP(p, "%s", buf);
+		GS_LOG_TSP(p, "%s", buf);
 		if ((p->is_network_forward) && (p->socks.dst_port != 0))
 			vlog_hostname(p, "Remote: ", p->socks.dst_port);
 	}
@@ -214,15 +215,22 @@ cbe_peer_timeout(void *ptr)
 	}
 
 	uint64_t expire = p->ts_peer_io + GS_PEER_IDLE_TIMEOUT;
-	if (p->is_received_gs_eof)
-		expire = p->ts_peer_io + GS_PEER_IDLE_TIMEOUT_EOF;
+	if (gopt.is_udp)
+	{
+		if (p->is_received_gs_eof)
+			expire = p->ts_peer_io + GS_PEER_IDLE_TIMEOUT_EOF_UDP;
+	} else {
+		if (!p->is_received_gs_eof)
+			return 0; // TCP and no EOF received yet.
+		expire = p->ts_peer_io + GS_PEER_IDLE_TIMEOUT_EOF_TCP;
+	}
 
 	// DEBUGF_C("PEER TIMEOUT check %ld\n", GS_PEER_IDLE_TIMEOUT);
 	// Return if data was transmitted recently
 	if (expire >= GS_TV_TO_USEC(&gopt.tv_now))
 		return 0; // not yet expired.
 
-	VLOG_TSP(p, "Idle Timeout.\n");
+	GS_LOG_TSP(p, "Idle Timeout.\n");
 	peer_free(p->gs->ctx->gselect_ctx, p);
 
 	return -1; // Event manager to free this event.
@@ -329,7 +337,7 @@ cb_read_stdin(GS_SELECT_CTX *ctx, int fd, void *arg, int val)
 	rv = read(fd, &c, sizeof c);
 	DEBUGF_R("%d %s\n", rv, strerror(errno));
 #endif
-	exit(255); // hard exit. 
+	exit(EX_FATAL); // hard exit. 
 }
 
 static int
@@ -403,7 +411,7 @@ cb_read_fd(GS_SELECT_CTX *ctx, int fd, void *arg, int val)
 		if (sz < 0)
 		{
 			DEBUGF_R("BAD AUTH COOKIE\n");
-			VLOG_TSP(p, "Bad Auth Cookie.\n");
+			GS_LOG_TSP(p, "Bad Auth Cookie.\n");
 			peer_free(ctx, p);
 			return GS_SUCCESS;
 		}
@@ -554,13 +562,15 @@ cb_read_gs_error(GS_SELECT_CTX *ctx, struct _peer *p, ssize_t len)
 	{
 		/* The same for STDOUT, tcp-fordward or cmd-forward [/bin/sh] */
 		DEBUGF_M("CMD shutdown(p->fd=%d)\n", p->fd_out);
-		shutdown(p->fd_out, SHUT_WR);	// BUG-2-MAX-FD
 		p->is_received_gs_eof = 1;
 		if (gopt.is_receive_only)
-		{
-			DEBUGF_M("is_receive_only is TRUE. Calling peer_free()\n");
 			peer_free(ctx, p);
-		}
+
+		// clients immediately exist if EOF from remote (-iC shell typing 'exit').
+		if ((gopt.is_interactive) && (!GS_is_server(p->gs)))
+			peer_free(ctx, p);
+
+		shutdown(p->fd_out, SHUT_WR);
 	} else if (len < 0) { /* any ERROR (but EOF) */
 		DEBUGF_R("Fatal error=%zd in GS_read() (stdin-forward == %d)\n", len, p->is_stdin_forward);
 		GS_shutdown(p->gs);
@@ -828,7 +838,7 @@ cb_complete_connect(GS_SELECT_CTX *ctx, int fd, void *arg, int val)
 	{
 		DEBUGF("%s\n", __func__);
 			
-		VLOG_TSP(p, "%s\n", strerror(errno));
+		GS_LOG_TSP(p, "%s\n", strerror(errno));
 		peer_free(ctx, p);
 		return GS_SUCCESS;
 	}
@@ -898,9 +908,9 @@ peer_new_init(GS *gs)
 	}
 
 	p->ts_peer_io = GS_TV_TO_USEC(&gopt.tv_now);
+	GS_EVENT_add_by_ts(&gs->ctx->gselect_ctx->emgr, &p->event_peer_timeout, 0, GS_SEC_TO_USEC(1), cbe_peer_timeout, p, 0);
 	if (gopt.is_udp)
 	{
-		GS_EVENT_add_by_ts(&gs->ctx->gselect_ctx->emgr, &p->event_peer_timeout, 0, GS_SEC_TO_USEC(1), cbe_peer_timeout, p, 0);
 		GS_BUF_init(&p->udp_buf, 0);
 	}
 
@@ -916,11 +926,11 @@ vlog_hostname(struct _peer *p, const char *desc, uint16_t port)
 	const char *u = gopt.is_udp?"(UDP)":"(TCP)";
 
 	if (hp == 443)
-		VLOG("    %s"D_BLU("%s")":"D_GRE("%d")" %s\n", desc, p->socks.dst_hostname, hp, u);
+		GS_LOG("    %s"D_BLU("%s")":"D_GRE("%d")" %s\n", desc, p->socks.dst_hostname, hp, u);
 	else if (hp == 80)
-		VLOG("    %s"D_BLU("%s")":"D_YEL("%d")" %s\n", desc, p->socks.dst_hostname, hp, u);
+		GS_LOG("    %s"D_BLU("%s")":"D_YEL("%d")" %s\n", desc, p->socks.dst_hostname, hp, u);
 	else
-		VLOG("    %s"D_BLU("%s")":"D_BRED("%d")" %s\n", desc, p->socks.dst_hostname, hp, u);
+		GS_LOG("    %s"D_BLU("%s")":"D_BRED("%d")" %s\n", desc, p->socks.dst_hostname, hp, u);
 }
 
 static int
@@ -935,7 +945,7 @@ peer_forward_connect(struct _peer *p, uint32_t ip, uint16_t port)
 	if (ret <= -2)
 	{
 		DEBUGF("%s peer-free\n", __func__);
-		VLOG_TSP(p, "%s\n", strerror(errno));
+		GS_LOG_TSP(p, "%s\n", strerror(errno));
 		peer_free(ctx, p);
 		return -1;
 	}
@@ -959,7 +969,7 @@ peer_new(GS_SELECT_CTX *ctx, GS *gs)
 
 	p = peer_new_init(gs);
 
-	VLOG_TSP(p, "New Connection\n");
+	GS_LOG_TSP(p, "New Connection\n");
 
 	/* Create a new fd to relay gs-traffic to/from */
 	if ((gopt.cmd != NULL) || (gopt.is_interactive))
@@ -1044,7 +1054,7 @@ cb_listen(GS_SELECT_CTX *ctx, int fd, void *arg, int val)
 	if (gs_new == NULL)
 	{
 		if (err <= -2)
-			ERREXIT("ERROR: %s.\n", GS_CTX_strerror(gs->ctx)); //Another Server is already listening or Network error.\n");
+			ERREXIT("%s\n", GS_CTX_strerror(gs->ctx)); //Another Server is already listening or Network error.\n");
 		/* HERE: GS_accept() is not ready yet to accept() a new
 		 * gsocket. (May have processed GS-pkt data) or may have 
 		 * closed the socket and established a new one (to wait for
@@ -1120,12 +1130,12 @@ cb_connect_client(GS_SELECT_CTX *ctx, int fd_notused, void *arg, int val)
 	DEBUGF_M("GS_connect(fd=%d) == %d\n", gs->fd, ret);
 	if (ret == GS_ERR_FATAL)
 	{
-		VLOG_TSP(p, "%s\n", GS_strerror(gs));
+		GS_LOG_TSP(p, "%s\n", GS_strerror(gs));
 		if (gopt.is_multi_peer == 0)
 		{
 			if (gs->status_code == GS_STATUS_CODE_CONNREFUSED)
-				exit(61); // Used by deploy.sh to verify that server is responding.
-			exit(255);	// No server listening
+				exit(EX_CONNREFUSED); // Used by deploy.sh to verify that server is responding.
+			exit(EX_FATAL);
 		}
 		/* This can happen if server accepts 1 connection only but client
 		 * wants to open multiple. All but the 1st connection will fail. We shall
@@ -1267,7 +1277,7 @@ cb_accept(GS_SELECT_CTX *ctx, int listen_fd, void *arg, int val)
 	memset(&addr, 0, sizeof addr);
 	socklen_t len = sizeof addr;
 	getpeername(fd, (struct sockaddr *)&addr, &len);
-	VLOG_TSP(p, "New Connection from %s:%d\n", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
+	GS_LOG_TSP(p, "New Connection from %s:%d\n", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
 
 	return GS_SUCCESS;
 }
@@ -1317,7 +1327,7 @@ my_usage(void)
 "gs-netcat [-lwiC] [-e cmd] [-p port] [-d ip]\n"
 "");
 
-	usage("skrlSgqwCTL");
+	usage("skrlSgvqwCTL");
 	fprintf(stderr, ""
 "  -S           Act as a SOCKS server [needs -l]\n"
 "  -D           Daemon & Watchdog mode [background]\n"
@@ -1342,7 +1352,7 @@ my_usage(void)
 "    $ gs-netcat -l -i                       # Server\n"
 "    $ gs-netcat -i                          # Client\n"
 "");
-	exit(255);
+	exit(EX_UNKNWNCMD);
 }
 
 static void
@@ -1455,7 +1465,7 @@ my_getopt(int argc, char *argv[])
 				uint16_t port = ntohs(gopt.port);
 				DEBUGF_G("Listening on port %u\n", port);
 				if (write(1, &port, sizeof port) != sizeof port)
-					exit(252); // FATAL
+					exit(EX_BADWRITE); // FATAL
 			}
 
 		}
@@ -1482,7 +1492,7 @@ my_getopt(int argc, char *argv[])
 	gopt.gsocket = gs_create();
 	
 	if (getenv("GSOCKET_NO_GREETINGS") == NULL)
-		VLOG("=Encryption     : %s (Prime: %d bits)\n", GS_get_cipher(gopt.gsocket), GS_get_cipher_strength(gopt.gsocket));
+		GS_LOG("=Encryption     : %s (Prime: %d bits)\n", GS_get_cipher(gopt.gsocket), GS_get_cipher_strength(gopt.gsocket));
 
 	atexit(cb_atexit);
 }
@@ -1618,21 +1628,38 @@ done:
 // 	exit(0);
 // }
 
+// static void
+// my_test(void)
+// {
+// 	char buf[56];
+// 	ssize_t n;
+// 	char res[2];
+
+// 	while (1)
+// 	{
+// 		n = read(0, buf, sizeof buf);
+// 		DEBUGF("read %zd\n", n);
+// 		if (n <= 0)
+// 			exit(0);
+// 		GS_sanitize_logmsg(buf, sizeof buf);
+// 		printf("%s\n", buf);
+// 	}
+// }
 
 int
 main(int argc, char *argv[])
 {
+	// my_test();
 	init_defaults(&argc, &argv);
 	my_getopt(argc, argv);
 
-	// my_test();
 
 	if (gopt.flags & GSC_FL_IS_SERVER)
 		do_server();
 	else
 		do_client();
 
-	exit(255);
+	exit(EX_NOTREACHED);
 	return -1;	/* NOT REACHED */
 }
 

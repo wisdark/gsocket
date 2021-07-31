@@ -4,7 +4,7 @@
 # Use docker.
 
 BASEDIR="$(cd "$(dirname "${0}")/../../../" || exit; pwd)"
-VER="$(grep AC_INIT "$BASEDIR/configure.ac" | cut -f2 -d" " | cut -f1 -d')')"
+VER="$(grep AC_INIT "${BASEDIR}/configure.ac" | cut -f3 -d"[" | cut -f1 -d']')"
 
 SRCDIR="${BASEDIR}/packaging/build/gsocket-${VER}"
 GSNCROOT="${BASEDIR}/packaging/gsnc-deploy-bin/docker"
@@ -38,8 +38,9 @@ docker_pack()
 	(cd "${dstdir}" && shasum "${filename}" && ls -al "${filename}")
 }
 
-docker_pack x86_64-centos 
+#docker_pack x86_64-centos 
 docker_pack x86_64-alpine 
-docker_pack i386-debian
+docker_pack i386-alpine 
+#docker_pack i386-debian
 docker_pack x86_64-debian
 # docker_pack x86_64-arch # NOT SUPPORTED. configure fails with "This script requires a shell more modern than all"
