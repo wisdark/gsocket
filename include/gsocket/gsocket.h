@@ -2,28 +2,6 @@
 #ifndef __LIBGSOCKET_H__
 #define __LIBGSOCKET_H__ 1
 
-
-#if 0
-#if defined __has_include
-#   if __has_include (<openssl/srp.h>)
-#       define HAS_OPENSSL_SRP  1
-#   endif
-#	if __has_include ("gsocket-ssl.h")
-#		define HAS_GSOCKET_SSL	1
-#	endif
-#	if __has_include (<gsocket/gsocket-ssl.h>)
-#		define HAS_GSOCKET_SSL	1
-#	endif
-#endif
-
-/* The user can delete gsocket-ssl.h to build his project without OpenSSL */
-#ifdef HAS_OPENSSL_SRP
-#	ifdef HAS_GSOCKET_SSL
-#		define WITH_GSOCKET_SSL		1
-#	endif
-#endif
-#endif
-
 #define WITH_GSOCKET_SSL 1
 
 #ifndef GS_MAX
@@ -74,10 +52,12 @@
 #include <gsocket/gs-readline.h>
 #include <gsocket/buf.h>
 
-#define GSRN_DEFAULT_PORT           7350
-#define GSRN_DEFAULT_PORT_SSL       443
+#define GSRN_DEFAULT_PORT           443
 #define GSRN_DEFAULT_PORT_CON       7351
-#define GSRN_DEFAULT_PING_INTERVAL  (60 * 2)
+// Some FW's kill connections after 60 seconds.
+#define GSRN_DEFAULT_PING_INTERVAL  (45)
+// Wait before allowing same listening address with different auth-token
+#define GSRN_TOKEN_LINGER_SEC       (7)
 
 /* ###########################
  * ### PROTOCOL DEFINITION ###
@@ -158,6 +138,8 @@ struct _gs_connect
 #define GS_FL_PROTO_FAST_CONNECT        (0x04)
 // Inform GSRN that client prefers low-latency (interactive shell)
 #define GS_FL_PROTO_LOW_LATENCY         (0x08)
+// Check if GS-ADDRESS is listening/waiting
+#define GS_FL_PROTO_SERVER_CHECK        (0x10)
 
 /*
  * all2GN
@@ -217,6 +199,8 @@ struct _gs_status
 #define GS_STATUS_CODE_IDLE_TIMEOUT (0x03)	// Timeout
 #define GS_STATUS_CODE_CONNDENIED   (0x04)  // Connection denied
 #define GS_STATUS_CODE_PROTOERROR   (0x05)  // Protocol error
+#define GS_STATUS_CODE_SERVER_OK    (0x06)  // Server exists
+#define GS_STATUS_CODE_NETERROR     (0x07)  // TCP error (likely ECONNREFUSED)
 #define GS_STATUS_CODE_NEEDUPDATE   (0x2A)  // oct=42; Needs updating of client.
 
 /*
@@ -284,7 +268,7 @@ typedef struct
 
 	uint32_t socks_ip;			// NBO. Use Socks5
 	uint16_t socks_port;		// Socks5
-	uint16_t gs_port;			// 7350 or GSOCKET_PORT
+	uint16_t gs_port;			// GSOCKET_PORT
 } GS_CTX;
 
 
@@ -334,7 +318,15 @@ struct gs_net
 };
 
 
-#define GS_SRP_PASSWORD_LENGTH       (32)
+// Originally the password was the first 128bit from a SHA256(gs_secret)
+// and then converted to a 32bytes hex string + '\0' to terminate.
+// 
+// A bug in any version <= 1.4.33 caused 1 extra hex to be added to the string
+// of size 32, making it 33 hex long and overwriting peer->gs_flags with '\0'.
+// Any version > 1.4.33 needs to be backward compatible. Thus we increase
+// the PASSWORD_LENGTH to 33 and from now onwards the SRP-PASSWORD
+// is 33 hex + '\0' long (132bit). Sucks to be us.
+#define GS_SRP_PASSWORD_LENGTH       (33)
 
 typedef struct
 {
@@ -430,6 +422,7 @@ char *GS_bin2HEX(char *dst, size_t dsz, const void *src, size_t sz);
 char *GS_bin2b58(char *b58, size_t *b58sz, uint8_t *src, size_t binsz);
 char *GS_addr2hex(char *dst, const void *src);
 char *GS_token2hex(char *dst, const void *src);
+char *GS_getenv(const char *name);
 
 int GS_CTX_setsockopt(GS_CTX *ctx, int level, const void *opt_value, size_t opt_len);
 
@@ -440,6 +433,7 @@ int GS_CTX_setsockopt(GS_CTX *ctx, int level, const void *opt_value, size_t opt_
 #define GS_OPT_USE_SOCKS			(0x20)	// Use TOR (Socks5)
 #define GS_OPT_SINGLESHOT			(0x40)
 #define GS_OPT_LOW_LATENCY          (0x80)
+#define GS_OPT_SERVER_CHECK         (0x100)
 
 ssize_t GS_write(GS *gsocket, const void *buf, size_t num);
 ssize_t GS_read(GS *gsocket, void *buf, size_t num);
@@ -448,7 +442,7 @@ uint32_t GS_hton(const char *hostname);
 uint8_t GS_ADDR_get_hostname_id(uint8_t *addr);
 void GS_SELECT_FD_SET_W(GS *gs);
 
-void GS_daemonize(FILE *logfp);
+void GS_daemonize(FILE *logfp, int code_force_exit);
 uint64_t GS_usec(void);
 void GS_format_bps(char *dst, size_t size, int64_t bytes, const char *suffix);
 #define GS_BPS_MAXSIZE       (8)  // _without_ length of suffix!

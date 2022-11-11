@@ -43,7 +43,11 @@
 #include "ids.h"
 #include "gs-netcat.h"
 #include "filetransfer_mgr.h"
-#include "man_gs-netcat.h"
+#ifndef STEALTH
+# include "man_gs-netcat.h"
+#else
+const char *man_str = "";
+#endif
 #include "gsocket_dso-lib.h"
 
 /* All connected gs-peers indexed by gs->fd */
@@ -167,6 +171,14 @@ peer_free(GS_SELECT_CTX *ctx, struct _peer *p)
 	DEBUGF_Y("free'ing peer on fd = %d\n", fd);
 	memset(p, 0, sizeof *p);
 	XFREE(peers[fd]);
+	// FIXME: Eventually GS_shutdown() needs to return ECALLAGAIN and then do 2 things:
+	// 1. Monitor socket for reading. Timeout after 10 seconds (peer died).
+	// 2. Poll on TIOCOUTQ and once empty call close().
+	// https://blog.netherlabs.nl/articles/2009/01/18/the-ultimate-so_linger-page-or-why-is-my-tcp-not-reliable
+	if (is_stdin_forward)
+	{
+		fd_kernel_flush(gs->fd);
+	}
 	GS_close(gs);	// sets gs->fd to -1
 	gopt.peer_count = MAX(gopt.peer_count - 1, 0);
 	DEBUGF_M("Freed gs-peer. Still connected: %d\n", gopt.peer_count);
@@ -183,7 +195,10 @@ peer_free(GS_SELECT_CTX *ctx, struct _peer *p)
 
 	/* STDIN/STDOUT reading supports one gs connection only */
 	if (is_stdin_forward)
+	{
+		DEBUGF("exiting...\n");
 		exit(0);
+	}
 }
 
 static void
@@ -191,12 +206,16 @@ cb_atexit(void)
 {
 	CONSOLE_reset();
 	stty_reset();
-	if (gopt.is_interactive)
+	if (gopt.is_try_server == 1)
+		printf("%s %s NET-ERROR\n", gopt.sec_str, GS_addr2hex(NULL, gopt.gs_addr.addr));
+
+	if ((gopt.is_interactive) && (!gopt.is_quiet))
 		fprintf(stderr, "\n[Bye]\n"); // stdout must be clean for pipe & gs-netcat
 }
 
-// Timer event for UDP to close peer when no data is transmitted for long
-// time.
+// Timer event for
+// 1. UDP to close peer when no data is transmitted for long time.
+// 2. Keep GSNC alive
 // This is called every second and checks if the idle timer
 // is larger than GS_PEER_IDLE_TIMEOUT (5*60 sec).
 // FIXME-Performance: Could have 1 event in gopt. and loop through all connected peers
@@ -214,6 +233,20 @@ cbe_peer_timeout(void *ptr)
 		return -1;
 	}
 
+	// Check if there was an idle timeout...
+	if (gopt.is_interactive)
+	{
+		// SERVER: app_keepalive_sec is +5 seconds larger than clients. This
+		// puts client in charge to keep connection alive before server
+		// checks. Server's ping are not answered by client (which is ok)
+		if (p->gs->ts_net_io + GS_SEC_TO_USEC(gopt.app_keepalive_sec) < GS_TV_TO_USEC(&gopt.tv_now))
+		{
+			DEBUGF_M("[%d] Sending PING\n", p->id);
+			cmd_ping(p);
+		}
+	}
+
+	// Timeout for gs-netcat <-> UDP/TCP-forward or stdin (/bin/bash).
 	uint64_t expire = p->ts_peer_io + GS_PEER_IDLE_TIMEOUT;
 	if (gopt.is_udp)
 	{
@@ -361,7 +394,6 @@ cb_read_fd(GS_SELECT_CTX *ctx, int fd, void *arg, int val)
 		{
 			// UDP packaging over TCP = [ 16 bit length | payload ]
 			p->wlen = read(fd, p->wbuf + 2, p->w_max - 2);
-			DEBUGF("read=%zd\n", p->wlen);
 			if (p->wlen > 0)
 			{
 				uint16_t len = htons(p->wlen);
@@ -370,6 +402,7 @@ cb_read_fd(GS_SELECT_CTX *ctx, int fd, void *arg, int val)
 			}
 		} else {
 			p->wlen = read(fd, p->wbuf, p->w_max);
+			// DEBUGF("read(%d)=%zd\n", fd, p->wlen);
 		}
 
 		if (p->wlen == 0)
@@ -424,6 +457,7 @@ cb_read_fd(GS_SELECT_CTX *ctx, int fd, void *arg, int val)
 	int was_data_for_console = 0;
 	if ((gopt.is_interactive) && (!(gopt.flags & GSC_FL_IS_SERVER)))
 	{
+		// CLIENT
 		was_data_for_console = CONSOLE_readline(p, p->wbuf, p->wlen);
 		if (was_data_for_console)
 			p->wlen = 0;
@@ -604,6 +638,7 @@ cb_read_gs(GS_SELECT_CTX *ctx, int fd, void *arg, int val)
 	}
 
 	p->rlen += len;
+	// HEXDUMP(p->rbuf, p->rlen);
 
 	if ((gopt.is_socks_server && (p->socks.state != GSNC_STATE_CONNECTED)))
 	{
@@ -650,6 +685,17 @@ cb_read_gs(GS_SELECT_CTX *ctx, int fd, void *arg, int val)
 				/* Protocol Error [FATAL] */
 				cb_read_gs_error(ctx, p, GS_ERR_FATAL);
 				return GS_SUCCESS; // Successfully removed peer
+			}
+
+			if ((gopt.is_pty_failed) && (gopt.flags & GSC_FL_IS_SERVER) && (p->pid > 0))
+			{
+				// Try our best to emulate at least Ctrl-C (0x03)
+				if ((p->rlen == 1) && (p->rbuf[0] == 0x03))
+				{
+					p->rlen = 0;
+					// Try to kill the process.
+					ctrl_c_child(p->pid);
+				}				
 			}
 		}
 
@@ -745,14 +791,19 @@ write_gs(GS_SELECT_CTX *ctx, struct _peer *p, int *killed)
 			/* Calls write_gs() */
 			return pkt_app_send_wsize(ctx, p, row);
 		}
+		if (gopt.is_status_nopty_pending)
+		{
+			gopt.is_status_nopty_pending = 0;
+			return pkt_app_send_status_nopty(ctx, p);
+		}
 		if (gopt.is_pong_pending)
 		{
 			gopt.is_pong_pending = 0;
 			return pkt_app_send_pong(ctx, p);
 		}
-		if (gopt.is_want_ping)
+		if (p->is_want_ping)
 		{
-			gopt.is_want_ping = 0;
+			p->is_want_ping = 0;
 			return pkt_app_send_ping(ctx, p);
 		}
 		if (gopt.is_want_pwd)
@@ -974,10 +1025,15 @@ peer_new(GS_SELECT_CTX *ctx, GS *gs)
 	/* Create a new fd to relay gs-traffic to/from */
 	if ((gopt.cmd != NULL) || (gopt.is_interactive))
 	{
-		p->fd_in = fd_cmd(gopt.cmd, &p->pid);// Forward to forked process stdin/stdout
+		p->fd_in = fd_cmd(gopt.cmd, &p->pid, &ret);// Forward to forked process stdin/stdout
 		DEBUGF_W("fd=%d, pid=%d\n", p->fd_in, p->pid);
 		p->fd_out = p->fd_in;
 		p->is_app_forward = 1;
+		if (ret == GS_FD_CMD_ERR_NOPTY)
+		{
+			gopt.is_pty_failed = 1;
+			gopt.is_status_nopty_pending = 1;
+		}
 	} else if (gopt.port != 0) {
 		p->fd_in = fd_new_socket(gopt.is_udp?SOCK_DGRAM:SOCK_STREAM);	// Forward to ip:port
 		p->fd_out = p->fd_in;
@@ -1053,8 +1109,14 @@ cb_listen(GS_SELECT_CTX *ctx, int fd, void *arg, int val)
 	gs_new = GS_accept(gs, &err);
 	if (gs_new == NULL)
 	{
+
 		if (err <= -2)
-			ERREXIT("%s\n", GS_CTX_strerror(gs->ctx)); //Another Server is already listening or Network error.\n");
+		{
+			int code = 255;
+			if (gs->status_code == GS_STATUS_CODE_BAD_AUTH)
+				code = EX_BAD_AUTH;
+			ERREXITC(code, "%s\n", GS_CTX_strerror(gs->ctx)); //Another Server is already listening or Network error.\n");
+		}
 		/* HERE: GS_accept() is not ready yet to accept() a new
 		 * gsocket. (May have processed GS-pkt data) or may have 
 		 * closed the socket and established a new one (to wait for
@@ -1089,6 +1151,7 @@ do_server(void)
 	GS_SELECT_CTX ctx;
 	int n;
 
+	gopt.app_keepalive_sec = GS_APP_KEEPALIVE_SERVER;
 	GS_SELECT_CTX_init(&ctx, &gopt.rfd, &gopt.wfd, &gopt.r, &gopt.w, &gopt.tv_now, GS_SEC_TO_USEC(1));
 	/* Tell GS_CTX subsystem to use GS-SELECT */
 	GS_CTX_use_gselect(&gopt.gs_ctx, &ctx);
@@ -1134,7 +1197,27 @@ cb_connect_client(GS_SELECT_CTX *ctx, int fd_notused, void *arg, int val)
 		if (gopt.is_multi_peer == 0)
 		{
 			if (gs->status_code == GS_STATUS_CODE_CONNREFUSED)
+			{
+				if (gopt.is_try_server)
+				{
+					printf("%s %s NO\n", gopt.sec_str, GS_addr2hex(NULL, gopt.gs_addr.addr));
+					gopt.is_try_server = 2; // Stop 'cb_atexit()' to print bad state.
+				}
 				exit(EX_CONNREFUSED); // Used by deploy.sh to verify that server is responding.
+			}
+			// Used in deploy.sh to check if server is listening with
+			// _GSOCKET_SERVER_CHECK_SEC=10 gs-netcat -s foobar
+			if ((gopt.gs_server_check_sec > 0) && (gs->status_code == GS_STATUS_CODE_SERVER_OK))
+			{
+				if (gopt.is_try_server)
+				{
+					printf("%s %s OK\n", gopt.sec_str, GS_addr2hex(NULL, gopt.gs_addr.addr));
+					gopt.is_try_server = 2; // Stop 'cb_atexit()' to print bad state.
+				}
+				exit(0);
+			}
+			if (gs->status_code == GS_STATUS_CODE_NETERROR)
+				exit(EX_NETERROR);
 			exit(EX_FATAL);
 		}
 		/* This can happen if server accepts 1 connection only but client
@@ -1153,6 +1236,7 @@ cb_connect_client(GS_SELECT_CTX *ctx, int fd_notused, void *arg, int val)
 		return GS_ECALLAGAIN;
 
 	DEBUGF_M("*** GS_connect() SUCCESS ***** %d %d %d\n", gs->fd, p->fd_in, p->fd_out);
+
 	/* HERE: Connection successfully established */
 	/* Start reading from Network (SRP is handled by GS_read()/GS_write()) */
 	GS_SELECT_add_cb(ctx, cb_read_gs, cb_write_gs, gs->fd, p, 0);
@@ -1182,6 +1266,7 @@ cb_connect_client(GS_SELECT_CTX *ctx, int fd_notused, void *arg, int val)
 		GS_SELECT_FD_SET_W(p->gs);
 		GS_PKT_assign_msg(&p->pkt, PKT_MSG_PONG, pkt_app_cb_pong, p);
 		GS_PKT_assign_msg(&p->pkt, PKT_MSG_LOG, pkt_app_cb_log, p);
+		GS_PKT_assign_msg(&p->pkt, PKT_MSG_STATUS, pkt_app_cb_status, p);
 		GS_PKT_assign_chn(&p->pkt, GS_CHN_PWD, pkt_app_cb_pwdreply, p); // Channel
 
 		GS_FTM_init(p, 0 /*client*/);
@@ -1321,14 +1406,18 @@ do_client(void)
 }
 
 static void
-my_usage(void)
+my_usage(int code)
 {
+#ifndef STEALTH
 	fprintf(stderr, ""
-"gs-netcat [-lwiC] [-e cmd] [-p port] [-d ip]\n"
+"gs-netcat [-skrlgvqwCTLtSDuim] [-s secret] [-e cmd] [-p port] [-d ip]\n"
 "");
+#endif
 
 	usage("skrlSgvqwCTL");
+#ifndef STEALTH
 	fprintf(stderr, ""
+"  -t           Check if peer is listening (do not connect)\n"
 "  -S           Act as a SOCKS server [needs -l]\n"
 "  -D           Daemon & Watchdog mode [background]\n"
 "  -d <IP>      IPv4 address for port forwarding\n"
@@ -1352,7 +1441,26 @@ my_usage(void)
 "    $ gs-netcat -l -i                       # Server\n"
 "    $ gs-netcat -i                          # Client\n"
 "");
-	exit(EX_UNKNWNCMD);
+#else // STEALTH
+	system("uname -a");
+#endif
+	exit(code);
+}
+
+static void
+cb_sigalarm(int sig)
+{
+	exit(EX_ALARM);
+}
+
+static void
+try_quiet(void)
+{
+	if (gopt.is_quiet == 0)
+		return;
+
+	gopt.log_fp = NULL;
+	gopt.err_fp = NULL;
 }
 
 static void
@@ -1360,13 +1468,19 @@ my_getopt(int argc, char *argv[])
 {
 	int c;
 	FILE *fp;
+	char *ptr;
 
 	do_getopt(argc, argv);	/* from utils.c */
 	optind = 1;	/* Start from beginning */
-	while ((c = getopt(argc, argv, UTILS_GETOPT_STR "mWuP:")) != -1)
+	while ((c = getopt(argc, argv, UTILS_GETOPT_STR "thmWuP:")) != -1)
 	{
 		switch (c)
 		{
+			case 't':
+				gopt.is_try_server = 1;
+				gopt.gs_server_check_sec = 10;
+				gopt.is_quiet = 1; // Implied
+				break;
 			case 'm':
 				printf("%s", man_str);
 				exit(0);
@@ -1404,23 +1518,36 @@ my_getopt(int argc, char *argv[])
 				fprintf(fp, "%u", getpid());
 				fclose(fp);
 				break;
+			case 'h':
+				my_usage(0); // On -h exit with 0 [it's a valid command]
 			default:
 				break;
 			case 'A':	// Disable -A for gs-netcat. Use gs-full-pipe instead
 			case '?':
-				my_usage();
+				my_usage(EX_UNKNWNCMD);
 		}
 	}
 
-	if (getenv("_GSOCKET_WANT_AUTHCOOKIE") != NULL)
+	if (GS_getenv("_GSOCKET_WANT_AUTHCOOKIE") != NULL)
 		gopt.is_want_authcookie = 1;
-	if (getenv("_GSOCKET_SEND_AUTHCOOKIE") != NULL)
+	if (GS_getenv("_GSOCKET_SEND_AUTHCOOKIE") != NULL)
 		gopt.is_send_authcookie = 1;
 
-	if (getenv("_GSOCKET_INTERNAL") != NULL)
+	if (GS_getenv("_GSOCKET_INTERNAL") != NULL)
 	{
 		DEBUGF_G("IS_INTERNAL\n");
 		gopt.is_internal = 1;
+	}
+
+	ptr = GS_getenv("_GSOCKET_SERVER_CHECK_SEC");
+	if (ptr != NULL)
+		gopt.gs_server_check_sec = atoi(ptr);
+
+	if (gopt.gs_server_check_sec > 0)
+	{
+		DEBUGF_G("SERVER_CHECK_SEC=%s (%d)\n", ptr, atoi(ptr));
+		alarm(gopt.gs_server_check_sec);
+		signal(SIGALRM, cb_sigalarm);
 	}
 
 	if (gopt.is_daemon)
@@ -1429,11 +1556,6 @@ my_getopt(int argc, char *argv[])
 			gopt.is_quiet = 1;
 	}
 
-	if (gopt.is_quiet != 0)
-	{
-		gopt.log_fp = NULL;
-		gopt.err_fp = NULL;
-	}
 
 	if (gopt.flags & GSC_FL_IS_SERVER)
 	{
@@ -1473,25 +1595,39 @@ my_getopt(int argc, char *argv[])
 
 	if ((gopt.is_internal) && (gopt.is_watchdog))
 	{
+		try_quiet();
 		gs_watchdog();
 	}
 
 	// init all (and ask for password if -s/-k missing)
 	init_vars();			/* from utils.c */
+	try_quiet();
 
 	/* Become a daemon & watchdog (auto-restart)
-	 * Do this before gs_create() so that any error in resolving
+	 * Do this before gs_create() so that any error in DNS resolving
 	 * is re-tried by watchdog.
 	 */
 	if (gopt.is_daemon)
 	{
+		if (gopt.token_str == NULL)
+		{
+			// Stop multiple daemons from starting (by crontab/.profile):
+			// Set the token-str uniq to this daemon. Then any other daemon
+			// that starts will have a different toek_str and GSRN will return
+			// a BAD-AUTH message.
+			// The child will then exit with  EX_BAD_AUTH which also triggers the daemon
+			// to exit (because another daemon is already connected).
+			char buf[1024];
+			snprintf(buf, sizeof buf, "%u-BAD-AUTH-CHECK-%s", getpid(), gopt.sec_str);
+			gopt.token_str = strdup(buf);
+		}
 		gopt.err_fp = gopt.log_fp;	// Errors to logfile or NULL
-		GS_daemonize(gopt.log_fp);
+		GS_daemonize(gopt.log_fp, EX_BAD_AUTH);
 	}
 
 	gopt.gsocket = gs_create();
 	
-	if (getenv("GSOCKET_NO_GREETINGS") == NULL)
+	if (gopt.is_greetings)
 		GS_LOG("=Encryption     : %s (Prime: %d bits)\n", GS_get_cipher(gopt.gsocket), GS_get_cipher_strength(gopt.gsocket));
 
 	atexit(cb_atexit);

@@ -1,12 +1,12 @@
-FROM i386/debian
+FROM muslcc/x86_64:arm-linux-musleabi
 
 ENV OPENSSL_VER=1.1.1k
 ENV OPENSSL_ARCH=linux-generic32
 
-RUN apt update -y && \
-	apt install -y --no-install-recommends automake gcc gcc-multilib make curl ca-certificates && \
-	apt clean && \
-	rm -rf /var/lib/apt/lists/ && \
+WORKDIR /root/
+RUN apk update \
+	&& apk add --no-cache bash perl make curl && \
+	rm -rf /var/cache/apk/* && \
 	curl https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz \
 	| tar -xzC /tmp/ && \
 	cd /tmp/openssl-${OPENSSL_VER} && \

@@ -222,11 +222,11 @@ GS_CTX_init(GS_CTX *ctx, fd_set *rfd, fd_set *wfd, fd_set *r, fd_set *w, struct 
 
 	ctx->socks_port = htons(GS_SOCKS_DFL_PORT);
 	char *ptr;
-	ptr = getenv("GSOCKET_SOCKS_IP");
+	ptr = GS_getenv("GSOCKET_SOCKS_IP");
 	if ((ptr != NULL) && (*ptr != '\0'))
 		ctx->socks_ip = inet_addr(ptr);
 
-	ptr = getenv("GSOCKET_SOCKS_PORT");
+	ptr = GS_getenv("GSOCKET_SOCKS_PORT");
 	if (ptr != NULL)
 		ctx->socks_port = htons(atoi(ptr));
 
@@ -344,7 +344,9 @@ GS_new(GS_CTX *ctx, GS_ADDR *addr)
 	gsocket->fd = -1;
 
 	uint16_t gs_port;
-	ptr = getenv("GSOCKET_PORT");
+	ptr = GS_getenv("GSOCKET_PORT");
+	if (ptr == NULL)
+		ptr = GS_getenv("GS_PORT");
 	if (ptr != NULL)
 		gs_port = htons(atoi(ptr));
 	else
@@ -353,7 +355,7 @@ GS_new(GS_CTX *ctx, GS_ADDR *addr)
 	ctx->gs_port = gs_port;	// Socks5 needs to know
 	gsocket->net.port = gs_port;
 
-	ptr = getenv("GSOCKET_IP");
+	ptr = GS_getenv("GSOCKET_IP");
 	if (ptr != NULL)
 	{
 		gsocket->net.addr = inet_addr(ptr);
@@ -363,19 +365,28 @@ GS_new(GS_CTX *ctx, GS_ADDR *addr)
 	{
 		/* HERE: Use Socks5 -or- GSOCKET_IP not available */
 		char buf[256];
-		hostname = getenv("GSOCKET_HOST");
+		hostname = GS_getenv("GSOCKET_HOST");
+		if (hostname == NULL)
+			hostname = GS_getenv("GS_HOST");
 		if (hostname == NULL)
 		{
-			uint8_t hostname_id;
-			hostname_id = GS_ADDR_get_hostname_id(addr->addr);
-			// Connect to [a-z].gsocket.io depending on GS-address
-			const char *domain;
-			domain = getenv("GSOCKET_DOMAIN");
-			if (domain == NULL)
-				domain = GS_NET_DEFAULT_HOST;
+			if (gsocket->net.addr != 0)
+			{
+				// Socks5 is used and GSOCKET_IP is set. Connect
+				// to GSOCKET_IP via Socks5.
+				hostname = strdup(int_ntoa(gsocket->net.addr));
+			} else {
+				uint8_t hostname_id;
+				hostname_id = GS_ADDR_get_hostname_id(addr->addr);
+				// Connect to [a-z].gsocket.io depending on GS-address
+				const char *domain;
+				domain = GS_getenv("GSOCKET_DOMAIN");
+				if (domain == NULL)
+					domain = GS_NET_DEFAULT_HOST;
 
-			snprintf(buf, sizeof buf, "%c.%s", 'a' + hostname_id, domain);
-			hostname = buf;
+				snprintf(buf, sizeof buf, "%c.%s", 'a' + hostname_id, domain);
+				hostname = buf;
+			}
 		}
 		gsocket->net.hostname = strdup(hostname);
 
@@ -708,6 +719,9 @@ gs_pkt_dispatch(GS *gsocket, struct gs_sox *sox)
 				case GS_STATUS_CODE_IDLE_TIMEOUT:
 					err_str = "Idle-Timeout. Server did not receive any data";
 					break;
+				case GS_STATUS_CODE_SERVER_OK:
+					err_str = "Server is listening.";
+					break;
 				default:
 					err_str = "UNKNOWN";
 					GS_sanitize_logmsg(msg, sizeof msg, (char *)status->msg, sizeof status->msg);
@@ -906,6 +920,7 @@ gs_process_by_sox(GS *gsocket, struct gs_sox *sox)
 			if (ret != GS_SUCCESS)
 			{
 				DEBUGF_R("will ret = %d, errno %s\n", ret, strerror(errno));
+				gsocket->status_code = GS_STATUS_CODE_NETERROR;
 				return GS_ERROR;	/* ECONNREFUSED or other */
 			}
 
@@ -1703,6 +1718,9 @@ gs_close(GS *gsocket)
 		FD_CLR(gsocket->fd, gsocket->ctx->r);
 		FD_CLR(gsocket->fd, gsocket->ctx->w);
 		/* HERE: This was not listening socket */
+		// shutdown(gsocket->fd, SHUT_WR);
+		// sleep(1);
+		// gsocket->fd = -1;
 		XCLOSE(gsocket->fd);
 		return;
 	}
@@ -1792,7 +1810,7 @@ GS_shutdown(GS *gsocket)
 			ret = shutdown(gsocket->fd, SHUT_RDWR);
 		else
 			ret = shutdown(gsocket->fd, SHUT_WR);
-		DEBUGF_B("tcp shutdown() = %d\n", ret);
+		DEBUGF_B("tcp shutdown() = %d, eof_count=%d\n", ret, gsocket->eof_count);
 		if (gsocket->eof_count == 0)
 			return GS_SUCCESS;
 		return GS_ERR_FATAL;
@@ -1858,7 +1876,7 @@ int
 GS_CTX_setsockopt(GS_CTX *ctx, int level, const void *opt_value, size_t opt_len)
 {
 
-	/* PROTOCOL FLAGS -> copied into pkt's flags 1:1 */
+	// PROTO-FLAGS
 	if (level == GS_OPT_SOCKWAIT)
 	{
 		ctx->flags_proto |= GS_FL_PROTO_WAIT;
@@ -1866,25 +1884,28 @@ GS_CTX_setsockopt(GS_CTX *ctx, int level, const void *opt_value, size_t opt_len)
 	} else if (level == GS_OPT_CLIENT_OR_SERVER) {
 		ctx->flags_proto |= GS_FL_PROTO_CLIENT_OR_SERVER;
 		ctx->flags_proto &= ~GS_FL_PROTO_FAST_CONNECT; // Disable fast-connect
-	}
-	else if (level == GS_OPT_LOW_LATENCY)
+	} else if (level == GS_OPT_LOW_LATENCY) {
 		ctx->flags_proto |= GS_FL_PROTO_LOW_LATENCY;
+	} else if (level == GS_OPT_SERVER_CHECK) {
+		ctx->flags_proto |= GS_FL_PROTO_SERVER_CHECK;
+	} 
 
-	/* FLAGS */
+	// GS-FLAGS 
 	else if (level == GS_OPT_BLOCK)
 		ctx->gs_flags &= ~GSC_FL_NONBLOCKING;
 	else if (level == GS_OPT_NO_ENCRYPTION)
 		ctx->gs_flags &= ~GSC_FL_USE_SRP;
 	else if (level == GS_OPT_SINGLESHOT)
 		ctx->gs_flags |= GS_FL_SINGLE_SHOT;
-	/* OPTIONS */
+
+	// OPTIONS
 	else if (level == GS_OPT_USE_SOCKS)
 	{
 		/* Set if not already set from GS_CTX_init() */
 		if (ctx->socks_ip == 0)
 			ctx->socks_ip = inet_addr(GS_SOCKS_DFL_IP);
 	} else
-		return -1;
+		return -1; // UNKNOWN option
 
 	return 0;	// Success
 }
@@ -1938,7 +1959,7 @@ GS_read(GS *gsocket, void *buf, size_t count)
 		if (len <= 0)
 		{
 			err = SSL_get_error(gsocket->ssl, len);
-			DEBUGF_Y("fd=%d, SSL Error: ret = %zd, err = %d (%s)\n", gsocket->fd, len, err, GS_SSL_strerror(err));
+			DEBUGF_Y("fd=%d, SSL Error: ret = %zd, err = %d (%s) %s\n", gsocket->fd, len, err, GS_SSL_strerror(err), strerror(errno));
 			ERR_print_errors_fp(stderr);
 		}
 #endif
@@ -2129,6 +2150,7 @@ GS_write(GS *gsocket, const void *buf, size_t count)
 	if (len > 0)
 	{
 			errno = 0;
+			gsocket->ts_net_io = GS_TV_TO_USEC(gsocket->ctx->tv_now);
 			gsocket->bytes_written += len;
 			if (gsocket->read_pending == 0)
 				gs_ssl_want_io_finished(gsocket);

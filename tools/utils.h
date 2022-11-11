@@ -8,15 +8,19 @@ void init_vars(void);
 GS *gs_create(void);
 void do_getopt(int argc, char *argv[]);
 void usage(const char *params);
-int fd_cmd(const char *cmd, pid_t *pidptr);
+int fd_cmd(const char *cmd, pid_t *pidptr, int *err);
+#define GS_FD_CMD_ERR_NOPTY     (0x01)
 int fd_new_socket(int type);
 int fd_net_listen(int fd, uint16_t *port, int type);
 int fd_net_accept(int listen_fd);
 int fd_net_connect(GS_SELECT_CTX *ctx, int fd, uint32_t ip, uint16_t port);
+void fd_kernel_flush(int fd);
 void stty_set_raw(void);
+void stty_switch_nopty(void);
 void stty_reset(void);
 void stty_check_esc(GS *gs, char c);
-char **mk_env(char **blacklist, char **addlist);
+void ctrl_c_child(pid_t pid);
+// char **mk_env(char **blacklist, char **addlist);
 void get_winsize(void);
 void cmd_ping(struct _peer *p);
 void cmd_pwd(struct _peer *p);
@@ -25,6 +29,7 @@ void sanitize_fname_to_str(uint8_t *str, size_t len);
 void format_bps(char *buf, size_t size, int64_t bytes);
 char *getcwdx(void);
 void gs_watchdog(void);
+
 
 // #define VLOG(a...)	do{if (gopt.log_fp != NULL){ fprintf(gopt.log_fp, a); fflush(gopt.log_fp); } }while(0)
 

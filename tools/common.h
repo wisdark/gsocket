@@ -152,7 +152,8 @@ struct _gopt
 	int is_win_resized;     // window size changed (signal)
 	int is_console;		    // console is being displayed
 	int is_pong_pending;    // Server: Answer to PING waiting to be send
-	int is_want_ping;       // Client: Wants to send a ping
+	int is_status_nopty_pending;
+	int is_pty_failed;      // Tried to create PTY but failed. Dump terminal.
 	int is_want_pwd;        // Client: Wants server to send cwd
 	int is_pwdreply_pending; // Server: Answer to pwd-request
 	int is_want_chdir; 
@@ -161,6 +162,11 @@ struct _gopt
 	int is_send_authcookie;
 	int is_internal;        // -I flag
 	int is_udp;             // Port forwarding only. GSRN is always TCP.
+	int is_built_debug;     // DEBUG is set
+	int is_greetings;
+	int is_try_server;      // Check with GSRN is server is listening.
+	int gs_server_check_sec;
+	char *prg_name;         // argv[0]
 	uint64_t ts_ping_sent;  // TimeStamp ping sent
 	fd_set rfd, r;
 	fd_set wfd, w;
@@ -181,8 +187,22 @@ struct _gopt
 	char *ids_active_user;
 	int ids_idle;
 	int n_users;             // Number of unique logged in users (from utmp)
+	int app_keepalive_sec;   // Interval for app-keepalive
 };
 
+#ifdef DEBUG
+#define GS_APP_KEEPALIVE        10 // If no activty send app-layer ping (-i needed)
+#else
+#define GS_APP_KEEPALIVE        GSRN_DEFAULT_PING_INTERVAL // If no activty send app-layer ping (-i needed)
+#endif
+// Let the client be in control to send PING's to keep the connection busy
+// but if the client is 5 sec late then start sending PINGS to client.
+#define GS_APP_KEEPALIVE_SERVER   (GS_APP_KEEPALIVE + 5)
+
+#define EX_CONNREFUSED  61  // Used by deploy.sh to verify that server is responding
+#define EX_BAD_AUTH    201  // Used to terminate watchdog/daemon
+#define EX_ALARM       202
+#define EX_NETERROR    203  // likely TCP ECONNREFUSED
 #define EX_EXECFAILED  248
 #define EX_NOTREACHED  249
 #define EX_BADWRITE    250  // write() failed
@@ -191,7 +211,6 @@ struct _gopt
 #define EX_BADSELECT   253
 #define EX_SIGTERM     254
 #define EX_FATAL       255
-#define EX_CONNREFUSED  61  // Used by deploy.sh to verify that server is responding
 
 struct _socks
 {
@@ -201,11 +220,11 @@ struct _socks
 	int state;
 };
 
-#define GSNC_STATE_AWAITING_MSG_AUTH		(0x01)
-#define GSNC_STATE_AWAITING_MSG_CONNECT		(0x02)
-#define GSNC_STATE_RESOLVING_DN				(0x03)
-#define GSNC_STATE_CONNECTING				(0x04)
-#define GSNC_STATE_CONNECTED				(0x05)
+#define GSNC_STATE_AWAITING_MSG_AUTH        (0x01)
+#define GSNC_STATE_AWAITING_MSG_CONNECT     (0x02)
+#define GSNC_STATE_RESOLVING_DN	            (0x03)
+#define GSNC_STATE_CONNECTING               (0x04)
+#define GSNC_STATE_CONNECTED                (0x05)
 
 
 /* gs-netcat peers */
@@ -229,6 +248,7 @@ struct _peer
 	int is_pty_first_read;		/* send stty hack */
 	int is_stty_set_raw;		/* Client only */
 	int is_received_gs_eof;     // EOF from GSRN
+	int is_want_ping;       // Client: Wants to send a ping
 	/* For Statistics */
 	int id;			/* Stats: assign an ID to each pere */
 	struct _socks socks;
@@ -326,6 +346,12 @@ extern struct _g_debug_ctx g_dbg_ctx; // declared in utils.c
 } while (0)
 
 #define XFREE(ptr)  do{if(ptr) free(ptr); ptr = NULL;}while(0)
+
+#define ERREXITC(code, a...)   do { \
+		xfprintf(gopt.err_fp, "ERROR(%d): ", code); \
+        xfprintf(gopt.err_fp, a); \
+        exit(code); \
+} while (0)
 
 #ifdef DEBUG
 # define ERREXIT(a...)   do { \

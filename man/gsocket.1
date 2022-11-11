@@ -130,15 +130,70 @@ to
 5. Connect from any other host to the newly created (hidden) openssh-server:
 .Dl $ gsocket -s MySecret ssh user@gsocket
 .Pp
+.Sh TESTING
+The
+.Nm
+tool uses the LD_PRELOAD method to hijack network calls from the calling process. It then concatenates the port number to the secret and spwans a gs-netcat process to forward the TCP connection. The setup can be tested with gs-netcat.
+.Pp
+.Nm Test 1
+- gsocket server and gs-netcat client:
+.Pp
+Server:
+.Dl $ gsocket -s MySecret nc -lp 1234 # TCP port is 1234
+Client:
+.Dl $ gs-netcat -s 1234-MySecret      # Notice `<port>-<SECRET>`
+.Pp
+.Nm Test 2
+- gsocket client and gs-netcat server:
+.Pp
+Server:
+.Dl $ gs-netcat -s 1234-MySecret -l
+Client:
+.Dl $ gsocket -s MySecret nc blah.gsocket 1234
+.Pp
+Internally the
+.Nm
+tool (on the client side) forks a background gs-netcat process listening on 127.31.33.7 on a random TCP port. The
+.Nm
+tool then detects `nc` trying to resolve `blah.gsocket` and returns 127.31.33.7 to `nc`. The `nc` process then connects to 127.31.33.7 instead and the gs-netcat process (that got started automatically) takes the connection and forwards the traffic via the GSRN. The `nc` tool can also directly connect to 127.31.33.7 instead of blah.gsocket (for testing):
+.Pp
+Client:
+.Dl $ gsocket -s MySecret nc -n 127.31.33.7 1234
+.Pp
+.Nm Test 3
+- SSHD via gsocket:
+.Pp
+Server:
+.Dl $ gsocket -s MySecret /usr/sbin/sshd -D -p 1234
+Client:
+.Dl $ gs-netcat -s 1234-MySecret
+.Dl SSH-2.0-OpenSSH_8.4p1 Debian-2
+.Pp
+Use gs-netcat as a port-forwarder and ssh to connect:
+.Pp
+Client:
+.Dl $ gs-netcat -s 1234-MySecret -p 44222
+.Dl $ ssh -p 44222 user@127.1
+.Pp
+.Nm Test 4
+- SSH via gsocket:
+.Pp
+On the server start a gs-netcat port forward to forward incoming GSRN connections to the SSHD on localhost:
+.Pp
+Server:
+.Dl $ gs-netcat -s 22-MySecret -l -d 127.0.0.1 -p 22
+Client:
+.Dl $ gsocket -s MySecret ssh user@gsocket
+.Pp
 .Sh ENVIRONMENT
 The following environment variables can be set to control the behavior of
 .Nm
 .Pp
 .Nm GSOCKET_SOCKS_IP
-.Dl Specify the IP address of the TOR server (or any other SOCKS server). Default is 127.0.0.1.
+.Dl Specify the IP address of the TOR server (or any other SOCKS server). Use together with -T. Default is 127.0.0.1.
 .Pp
 .Nm GSOCKET_SOCKS_PORT
-.Dl The port number of the TOR server (or any other SOCKS server). Default is 9050.
+.Dl The port number of the TOR server (or any other SOCKS server). Use together with -T. Default is 9050.
 .Pp
 .Nm GSOCKET_ARGS
 .Dl A string containing additional command line parameters. First the normal command line parameters are processed and then the command line parameters from GSOCKET_ARGS.
@@ -148,7 +203,7 @@ Passing the password as command line parameter is not secure. Consider using the
 .Dl $ gsocket -k <file>
 .Pp
 .Dl $ export GSOCKET_ARGS="-s MySecret"
-.Dl $ gs
+.Dl $ gsocket
 .Pp
 .Nm 1.
 The security is end-2-end. This means from user-2-user (and not just to the GSRN). The GSRN relays only (encrypted) data to and from the users.
@@ -173,12 +228,12 @@ SRP has Perfect Forward Secrecy. This means that past sessions can not be decryp
 .Sh NOTES
 The latest version is available from https://github.com/hackerschoice/gsocket/.
 .Sh SEE ALSO
-.Xr gs-netcat 1 ,
-.Xr gs-sftp 1 ,
-.Xr gs-mount 1 ,
-.Xr blitz 1 ,
-.Xr nc 1 ,
-.Xr socat 1
+.Xr gs-netcat(1) ,
+.Xr gs-sftp(1) ,
+.Xr gs-mount(1) ,
+.Xr blitz(1) ,
+.Xr nc(1) ,
+.Xr socat(1)
 .Sh BUGS
 Efforts have been made to have
 .Nm
