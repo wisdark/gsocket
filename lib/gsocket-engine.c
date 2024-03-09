@@ -753,7 +753,7 @@ sox_read(struct gs_sox *sox, size_t len)
 	ret = read(sox->fd, sox->rbuf + sox->rlen, len);
 	if (ret == 0)	/* EOF */
 	{
-		/* HERE: GS-NET can not find a listening peer for this GS-addres.
+		/* HERE: GS-NET can not find a listening peer for this GS-address.
 		 * Disconnect hard.
 		 */
 		DEBUGF_R("EOF on GS TCP connection -> treat as ECONNRESET\n");
@@ -1498,6 +1498,8 @@ GS_connect(GS *gsocket)
 
 	if (ret < 0)
 	{
+		if (errno == ECONNRESET)
+			gsocket->status_code = GS_STATUS_CODE_NETERROR;
 		DEBUGF("GS_connect() will ret = %d (%s)\n", ret, ret==GS_ERR_WAITING?"WAITING":"FATAL");
 		return ret;
 	}
@@ -1960,7 +1962,7 @@ GS_read(GS *gsocket, void *buf, size_t count)
 		{
 			err = SSL_get_error(gsocket->ssl, len);
 			DEBUGF_Y("fd=%d, SSL Error: ret = %zd, err = %d (%s) %s\n", gsocket->fd, len, err, GS_SSL_strerror(err), strerror(errno));
-			ERR_print_errors_fp(stderr);
+			gs_set_errorf(gsocket, "SSL: %s", ERR_error_string(err, NULL));
 		}
 #endif
 	} else {
@@ -2281,10 +2283,12 @@ GS_bytesstr_long(char *dst, size_t len, int64_t bytes)
 const char *
 GS_logtime(void)
 {
-	static char tbuf[32];
+	static char tbuf[64];
+	int s_errno = errno; // muslcc bug where localtime() sets errno to 2 or 22 on success.
 
 	time_t t = time(NULL);
 	strftime(tbuf, sizeof tbuf, "%c", localtime(&t));
+	errno = s_errno;
 
 	return tbuf;
 }

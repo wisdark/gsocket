@@ -112,6 +112,15 @@ init_defaults(int *argcptr, char **argvptr[])
 		// DEBUGF_C("Max File Des: %llu (max = %llu)\n", rlim.rlim_cur, rlim.rlim_max);
 	}
 
+	// If started directly from a +s shell (ps. tcsh's startup script fail hard
+	// if euid != uid)
+	uid_t e = geteuid();
+	if (e != getuid())
+		ret = setreuid(e, e);
+	e = getegid();
+	if (e != getgid())
+		ret = setregid(e, e);
+
 	add_env_argv(argcptr, argvptr);
 
 	gopt.app_keepalive_sec = GS_APP_KEEPALIVE;
@@ -266,6 +275,11 @@ init_vars(void)
 
 	GS_LOG_V("=GS Address     : %s\n", GS_addr2hex(NULL, gopt.gs_addr.addr));
 
+	gopt.is_stdin_a_tty = isatty(STDIN_FILENO);
+	// Interactive session but not a TTY: Assume user is piping commands into the shell.
+	if ((gopt.is_interactive && !(gopt.flags & GSC_FL_IS_SERVER) && !gopt.is_stdin_a_tty))
+		gopt.is_stdin_ignore_eof = 1;
+
 	signal(SIGTERM, cb_sigterm);
 }
 
@@ -290,6 +304,9 @@ usage(const char *params)
 				break;
 			case 'r':
 				fprintf(stderr, "  -r           Receive-only. Terminate when no more data.\n");
+				break;
+			case 'I':
+				fprintf(stderr, "  -I           Ignore EOF on stdin.\n");
 				break;
 			case 's':
 				fprintf(stderr, "  -s <secret>  Secret (e.g. password).\n");
@@ -373,6 +390,9 @@ do_getopt(int argc, char *argv[])
 				break;
 			case 'r':
 				gopt.is_receive_only = 1;
+				break;
+			case 'I':
+				gopt.is_stdin_ignore_eof = 1;
 				break;
 			case 'i':
 				gopt.is_interactive = 1;
@@ -607,48 +627,111 @@ ctrl_c_child(pid_t pid)
 
 
 /*
- * Return SHELL, shell name (/bin/bash , -bash) and prgname (procps)
+ * Return SHELL_PATH, shell name (/bin/bash , -bash) and prgname (procps)
  */
 static const char *
 mk_shellname(const char *shell, char *shell_name, ssize_t len, const char **prgname)
 {
-	char *dfl_shell = "/bin/sh";
+	char *dfl_shell = NULL;
+	char *ptr;
 	struct stat sb;
-	if (stat("/bin/bash", &sb) == 0)
+	int is_great_shell = 0;
+	if (stat("/bin/bash", &sb) == 0) {
 		dfl_shell = "/bin/bash";
-	else if (stat("/usr/bin/bash", &sb) == 0)
+		is_great_shell = 1;
+	} else if (stat("/usr/bin/bash", &sb) == 0) {
 		dfl_shell = "/usr/bin/bash";
+		is_great_shell = 1;
+	} else if (stat("/usr/local/bin/bash", &sb) == 0) {
+		dfl_shell = "/usr/local/bin/bash";
+		is_great_shell = 1;
+	} else if (stat("/bin/csh", &sb) == 0) {
+		dfl_shell = "/bin/csh";
+		is_great_shell = 1;
+	} else if (stat("/bin/sh", &sb) == 0) {
+		dfl_shell = "/bin/sh";
+	} else if (stat("./bash", &sb) == 0) {
+		dfl_shell = "./bash";
+		is_great_shell = 1;
+	} else if (stat("./sh", &sb) == 0) {
+		dfl_shell = "./sh";
+	} else if (stat("/cygdrive/c/WINDOWS/system32/cmd.exe", &sb) == 0)
+		dfl_shell = "/cygdrive/c/WINDOWS/system32/cmd.exe";
 
-	if (shell != NULL)
+	if ((shell != NULL) && (shell[0] == '\0'))
+		shell = NULL;
+		
+	// Check if absolute 'shell' exists or name exists in /bin, /usr/bin
+	while (shell != NULL)
 	{
-		// DO not use /bin/sh if /bin/bash is around
-		if ((strcmp(shell, "sh") == 0) || (strcmp(shell, "/bin/sh") == 0))
-			shell = NULL; 
-	}
-	if (shell == NULL)
-		shell = dfl_shell;
+		ptr = strrchr(shell, '/');
+		if (ptr != NULL)
+		{
+			// /bin/sh, /bin/bash, ./sh, ./bash
+			if (stat(shell, &sb) != 0)
+				shell = NULL; // SHELL= was set to absolute path but file does not exist
+			break;
+		}
+		// HERE: SHELL= was not an absolute path.
 
-	char *ptr = strrchr(shell, '/');
-	if (ptr == NULL)
-	{
-		// SHELL= is not an absolute path. Perhaps just 'zsh' or 'bash'
-		// Find the absolute path
-		shell = dfl_shell;
 		char buf[32];
 		snprintf(buf, sizeof buf, "/bin/%s", shell);
-		if (stat(buf, &sb) == 0)
+		if (stat(buf, &sb) == 0) {
 			shell = strdup(buf);
-		ptr = strrchr(shell, '/');
+			break;
+		}
+		snprintf(buf, sizeof buf, "/usr/bin/%s", shell);
+		if (stat(buf, &sb) == 0) {
+			shell = strdup(buf);
+			break;
+		}
+		snprintf(buf, sizeof buf, "/usr/local/bin/%s", shell);
+		if (stat(buf, &sb) == 0) {
+			shell = strdup(buf);
+			break;
+		}
+
+		shell = NULL;
 	}
+
+	// Check if 'shell' is just 'sh' and a better shell exists.
+	if ((shell != NULL) && (is_great_shell == 1))
+	{
+		ptr = strrchr(shell, '/');
+		if ((ptr != NULL) && (strcmp(ptr, "/sh") == 0))
+			shell = NULL;
+		if (strstr(shell, "nologin") != NULL)
+			shell = NULL;
+		if (strstr(shell, "jailshell") != NULL)
+			shell = NULL;
+	}
+
+	if (shell == NULL)
+	{
+		if (dfl_shell == NULL)
+			return NULL;
+		shell = dfl_shell;
+	}
+
+	ptr = strrchr(shell, '/');
+	if (ptr == NULL)
+		return NULL;
+
 	ptr += 1;
+	*prgname = NULL;
 #ifdef STEALTH
-	*prgname = gopt.prg_name;
-	if (gopt.prg_name != NULL)
-		*prgname = gopt.prg_name;
-#else
-	*prgname = shell_name;
-	snprintf(shell_name, len, "-%s", ptr);
+	struct stat st;
+	// Set PRGNAME unless it's a link (BusyBox etc)
+	if (lstat(shell, &st) == 0)
+	{
+		if (!S_ISLNK(st.st_mode))
+			*prgname = gopt.prg_name; // HIDE as prg_name
+	}
 #endif
+	
+	snprintf(shell_name, len, "-%s", ptr);
+	if (*prgname == NULL)
+		*prgname = shell_name;
 
 	return shell;
 }
@@ -876,12 +959,24 @@ forkfd(int *fd)
 	return pid;
 }
 
+// Child's process stderr goes to client via TCP. On (some) Cygwin/Windows
+// we need to sleep() for the stderr buffer to flush (wtf).
+#define SLOWEXIT(a...)	do { \
+	fprintf(stderr, "ERROR: "); \
+	fprintf(stderr, a); \
+	sleep(1); \
+	exit(255); \
+} while (0)
+
 static int
 pty_cmd(const char *cmd, pid_t *pidptr, int *err)
 {
 	pid_t pid;
 	int fd = -1;
 	int is_nopty = 0;
+	char **envp;
+	size_t envplen = 0;
+	envp = calloc(64, sizeof *envp);
 	
 	*err = 0;
 	pid = forkpty(&fd, NULL, NULL, NULL);
@@ -919,29 +1014,30 @@ pty_cmd(const char *cmd, pid_t *pidptr, int *err)
 		signal(SIGINT, SIG_DFL);
 		signal(SIGCHLD, SIG_DFL);
 		signal(SIGTERM, SIG_DFL);
-
 		/* Find out default ENV (just in case they do not exist in current
 		 * env-variable such as when started during bootup.
 		 * Note: Do not use shell from /etc/passwd as this might be /bin/nologin.
 		 * Instead, use the same shell that was used when gs-netcat server got
 		 * started.
 		 */
-		const char *shell = "/bin/sh"; // default
+		const char *shell = NULL; //"/bin/sh"; // default
 		char shell_name[64];	// e.g. -bash
 		const char *prg_name;
 		shell_name[0] = '\0';
 		if (cmd == NULL)
 			shell = GS_getenv("SHELL");
 		shell = mk_shellname(shell, shell_name, sizeof shell_name, &prg_name);
+		if (shell == NULL)
+			SLOWEXIT("No shell found in /bin or /usr/bin or ./. Try setting SHELL=\n");
 
 		char buf[1024];
 		snprintf(buf, sizeof buf, "SHELL=%s", shell);
-		char *shell_env = strdup(buf);
+		envp[envplen++] = strdup(buf);
 
 		char *user = "root";
 		char *home_env = "HOME=/root";
-		char *name_env;
-		char *logname_env;
+		// char *name_env;
+		// char *logname_env;
 		struct passwd *pwd;
 		pwd = getpwuid(getuid());
 		if (pwd != NULL)
@@ -950,17 +1046,36 @@ pty_cmd(const char *cmd, pid_t *pidptr, int *err)
 			snprintf(buf, sizeof buf, "HOME=%s", pwd->pw_dir);
 			home_env = strdup(buf);
 		}
+		envp[envplen++] = home_env;
+
+		// Sometimes the user has no home directory or there is no .bashrc.
+		// Do the best we can to set a nice prompt and give a hint to the user.
+		char *str = "\\[\\033[36m\\]\\u\\[\\033[m\\]@\\[\\033[32m\\]\\h:\\[\\033[33;1m\\]\\w\\[\\033[m\\]\\$ ";
+		snprintf(buf, sizeof buf, "PS1=%s", str);
+		printf("=Hint           : PS1='%s'\n", str);
+		if (GS_getenv("PS1") == NULL)
+		{
+			// Note: This only works for /bin/sh because bash resets this value.
+			envp[envplen++] = strdup(buf);
+			envp[envplen++] = "PS2=> ";
+		}
 
 		snprintf(buf, sizeof buf, "USER=%s", user);
-		name_env = strdup(buf);
+		envp[envplen++] = strdup(buf);
 		snprintf(buf, sizeof buf, "LOGNAME=%s", user);
-		logname_env = strdup(buf);
+		envp[envplen++] = strdup(buf);
 
-		snprintf(buf, sizeof buf, "PATH=%s", getenv("PATH")?:"/usr/bin:/bin:/usr/sbin:/sbin");
-		char *path_env = strdup(buf);
+		if (shell[0] == '.')
+		{
+			// Windows without cygwin install executes ./bash or ./sh
+			snprintf(buf, sizeof buf, "PATH=%s:%s", getcwdx()?:"/", GS_getenv("PATH")?:"/usr/bin:/bin:/usr/sbin:/sbin");
+		} else {
+			snprintf(buf, sizeof buf, "PATH=%s", GS_getenv("PATH")?:"/usr/bin:/bin:/usr/sbin:/sbin");
+		}
+		envp[envplen++] = strdup(buf);
 
 		snprintf(buf, sizeof buf, "MAIL=/var/mail/%.50s", user);
-		char *mail_env = strdup(buf);
+		envp[envplen++] = strdup(buf);
 
 		/* Start with a clean environemnt (like OpenSSH does).
 		 * STY = Confuses screen if gs-netcat is started from within screen (OSX)
@@ -972,12 +1087,14 @@ pty_cmd(const char *cmd, pid_t *pidptr, int *err)
 		 * 2. Retrieve TZ, TERM, DISPLAY, LANG, LC from client.
 		 * 3. Add ~/.ssh/environment
 		 */
-		char *envp[] = {path_env, shell_env, mail_env, "TERM=xterm-256color", "HISTFILE=/dev/null", "LANG=en_US.UTF-8", home_env, name_env, logname_env, NULL};
+		envp[envplen++] = "TERM=xterm-256color";
+		envp[envplen++] = "HISTFILE=/dev/null";
+		envp[envplen++] = "LANG=en_US.UTF-8";
 
 		if (cmd != NULL)
 		{
 			execle("/bin/sh", cmd, "-c", cmd, NULL, envp);
-			ERREXIT("exec(%s) failed: %s\n", cmd, strerror(errno));
+			SLOWEXIT("exec(%s) failed: %s\n", cmd, strerror(errno));
 		} 
 
 		if (is_nopty)
@@ -992,7 +1109,7 @@ pty_cmd(const char *cmd, pid_t *pidptr, int *err)
 
 		// For PTY Terminals the -il is not needed
 		execle(shell, prg_name, NULL, envp);
-		ERREXIT("execlp(%s) failed: %s\n", shell, strerror(errno));
+		SLOWEXIT("execlp(%s) failed: %s\n", shell, strerror(errno));
 	}
 	/* HERE: Parent */
 
@@ -1212,7 +1329,7 @@ fd_kernel_flush(int fd)
 void
 cmd_ping(struct _peer *p)
 {
-	DEBUGF("Sending PING\n");
+	DEBUGF("Sending PING (waiting-for-reply==%d)\n", p->is_want_ping);
 	if (p->is_want_ping != 0)
 		return;
 

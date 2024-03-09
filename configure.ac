@@ -1,6 +1,6 @@
 dnl Process this File with autoconf to produce a configure script.
 AC_PREREQ([2.69])
-AC_INIT([gsocket],[1.4.39])
+AC_INIT([gsocket],[1.4.42dev2])
 AC_CONFIG_AUX_DIR(config)
 AC_CANONICAL_TARGET
 
@@ -115,7 +115,7 @@ esac
 
 dnl Checks for header files.
 AC_HEADER_SYS_WAIT
-AC_CHECK_HEADERS(sys/time.h sys/endian.h unistd.h fnmatch.h string.h utmp.h utmpx.h pty.h openssl/srp.h util.h libutil.h netinet/in_systm.h sys/loadavg.h libproc.h)
+AC_CHECK_HEADERS(sys/time.h sys/endian.h sys/param.h unistd.h fnmatch.h string.h utmp.h utmpx.h pty.h openssl/srp.h util.h libutil.h netinet/in_systm.h sys/loadavg.h libproc.h wordexp.h)
 
 AC_CHECK_HEADER(openssl/srp.h, [], [AC_MSG_ERROR([openssl/srp.h not found. Update OpenSSL or apt install libssl-dev?])])
 
@@ -162,6 +162,7 @@ dnl AC_CHECK_LIB([net], [libnet_init], ,[AC_MSG_ERROR([libnet 1.1.x not found])]
 if test x"$STATIC" = xno; then
 	AC_CHECK_LIB(dl, dlopen)
 fi
+AC_CHECK_LIB(dl, dlopen, LDADD_LIBDL="-ldl")
 AC_CHECK_LIB(procstat, procstat_close)
 dnl 
 if test x"$STATIC_SSL" != xyes; then
@@ -210,6 +211,7 @@ AS_IF([test x$selftests = xtrue], AC_SUBST(PROGRAMS_TEST_LIB, "list-test${EXEEXT
 AS_IF([test x$selftests = xtrue], AC_SUBST(PROGRAMS_TEST_TOOLS, "packet-test${EXEEXT} readline-test${EXEEXT} console_display-test${EXEEXT} filetransfer-test${EXEEXT}"))
 
 AC_SUBST(LDADD_STATIC, "${LDADD_STATIC}")
+AC_SUBST(LDADD_LIBDL, "${LDADD_LIBDL}")
 AC_SUBST(CFLAGS_STATIC, "${CFLAGS_STATIC}")
 AC_SUBST(PERM_DSO, "${PERM_DSO}")
 AC_SUBST(SONAME_GSOCKET_DSO, "${SONAME_GSOCKET_DSO}")

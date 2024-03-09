@@ -64,6 +64,8 @@ gs_select_rw_save_state(GS_SELECT_CTX *ctx, int fd, char *idstr)
 void
 gs_select_rw_restore_state(GS_SELECT_CTX *ctx, int fd, char *idstr)
 {
+	if (fd < 0)
+		return;
 	if (ctx->is_rw_state_saved[fd] == 0)
 	{
 		// DEBUGF("RWFD was not saved. Nothing to restore (fd = %d, %s).\n", fd, idstr);
@@ -250,10 +252,6 @@ GS_select(GS_SELECT_CTX *ctx)
 			ctx->emgr.is_return_to_caller = 0;
 			return 0;
 		}
-		// if (((ctx->hb_freq > 0) && GS_TV_TO_USEC(ctx->tv_now) > ctx->hb_next))
-		// {
-			// return 0;
-		// }
 	} /* while (1) */
 
 	ERREXIT("NOT REACHED\n");

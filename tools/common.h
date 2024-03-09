@@ -6,6 +6,9 @@
 # include <config.h>
 #endif
 
+#ifdef HAVE_SYS_PARAM_H
+# include <sys/param.h>
+#endif
 #include <sys/types.h>
 #include <sys/time.h>
 #include <sys/socket.h>
@@ -47,7 +50,11 @@
 #include <libgen.h>		/* basename() */
 #include <termios.h>
 #include <pwd.h>
-#include <wordexp.h>
+#ifdef HAVE_WORDEXP_H
+# include <wordexp.h>
+#else
+# warning "wordexp.h not found. File Transfer may not work with globbing"
+#endif
 #ifdef HAVE_UTMPX_H
 # include <utmpx.h>
 #endif
@@ -166,6 +173,8 @@ struct _gopt
 	int is_greetings;
 	int is_try_server;      // Check with GSRN is server is listening.
 	int gs_server_check_sec;
+	int is_stdin_a_tty;
+	int is_stdin_ignore_eof;
 	char *prg_name;         // argv[0]
 	uint64_t ts_ping_sent;  // TimeStamp ping sent
 	fd_set rfd, r;

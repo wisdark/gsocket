@@ -7,7 +7,6 @@
  */
 
 #include "common.h"
-#include <wordexp.h>
 #include <dirent.h>
 #include "utils.h"
 #include "globbing.h"
@@ -137,6 +136,8 @@ gs_gl(gsglobbing_cb_t func, const char *path, GS_GL *res)
 // needs consideration of where to add the '/./'.
 // - If fname already contains '/./' then do nothing.
 
+
+#ifdef HAVE_WORDEXP_H
 int
 GS_GLOBBING(gsglobbing_cb_t func, const char *exp, uint32_t glob_id, void *arg_ptr, uint32_t arg_val)
 {
@@ -368,6 +369,14 @@ done:
 	XFREE(wdir);
 	return n_found;
 }
+
+#else
+// __OPENBSD__
+int
+GS_GLOBBING(gsglobbing_cb_t func, const char *exp, uint32_t glob_id, void *arg_ptr, uint32_t arg_val) {
+	return 0; // NOT FOUND
+}
+#endif
 
 static uint32_t glob_id = 0xFFFFFFFF;
 

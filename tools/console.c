@@ -10,7 +10,6 @@
  * https://www.linuxquestions.org/questions/programming-9/get-cursor-position-in-c-947833/
  */
 #include "common.h"
-#include <wordexp.h>
 #include <dirent.h>
 #include "pkt_mgr.h"
 #include "console.h"
@@ -1373,6 +1372,7 @@ cmd_help(int fd)
 static int
 path_resolve(const char *pattern, char *dst, size_t len)
 {
+#ifdef HAVE_WORDEXP_H
 	wordexp_t p;
 	int ret;
 
@@ -1402,6 +1402,9 @@ path_resolve(const char *pattern, char *dst, size_t len)
 	wordfree(&p);
 
 	return 0;
+#else
+	return -1;
+#endif
 }
 
 
@@ -1456,6 +1459,7 @@ cmd_lls_file(const char *name)
 static void
 cmd_lls_single(const char *exp)
 {
+#ifdef HAVE_WORDEXP_H
 	wordexp_t p;
 	char **w;
 	DIR *d = NULL;
@@ -1505,6 +1509,9 @@ err:
 		closedir(d);
 
 	wordfree(&p);
+#else
+	return;
+#endif
 }
 
 static void
